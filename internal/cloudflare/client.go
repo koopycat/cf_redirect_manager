@@ -7,15 +7,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/koopycat/cf-redirect/internal/domain"
 )
 
 const DefaultBaseURL = "https://api.cloudflare.com/client/v4"
+
+// defaultClient guards against hangs when no HTTPClient is configured.
+var defaultClient = &http.Client{Timeout: 30 * time.Second}
 
 type Client struct {
 	HTTPClient *http.Client
@@ -101,9 +107,14 @@ func (o *BulkOperation) normalizeID() {
 }
 
 func (o BulkOperation) terminal() (done, success bool) {
+	// A non-empty error field is terminal even if the status still says
+	// running/pending — Cloudflare reports partial failures this way.
+	if o.Error != "" || o.ErrorCount > 0 {
+		return true, false
+	}
 	switch strings.ToLower(o.Status) {
 	case "completed", "complete", "success", "succeeded":
-		return true, o.Error == "" && o.ErrorCount == 0
+		return true, true
 	case "failed", "failure", "cancelled", "canceled":
 		return true, false
 	default:
@@ -212,10 +223,27 @@ func (c *Client) GetBulkOperation(ctx context.Context, accountID, operationID st
 	return response.Result, nil
 }
 
+const (
+	// BulkWaitTimeout bounds how long an asynchronous Cloudflare operation may
+	// remain without a terminal status before we return a recovery hint.
+	BulkWaitTimeout = 90 * time.Second
+	// DefaultBulkPollInterval is the first delay after the immediate status
+	// check. Subsequent delays double to reduce pressure on the API.
+	DefaultBulkPollInterval = time.Second
+	// MaxBulkPollInterval keeps the UI reasonably current without polling the
+	// shared Cloudflare token aggressively during long-running operations.
+	MaxBulkPollInterval = 8 * time.Second
+)
+
 func (c *Client) WaitBulkOperation(ctx context.Context, accountID, operationID string, interval time.Duration) (BulkOperation, error) {
 	if interval <= 0 {
-		interval = 500 * time.Millisecond
+		interval = DefaultBulkPollInterval
 	}
+	if interval > MaxBulkPollInterval {
+		interval = MaxBulkPollInterval
+	}
+	deadline := time.NewTimer(BulkWaitTimeout)
+	defer deadline.Stop()
 	for {
 		operation, err := c.GetBulkOperation(ctx, accountID, operationID)
 		if err != nil {
@@ -233,8 +261,23 @@ func (c *Client) WaitBulkOperation(ctx context.Context, accountID, operationID s
 			timer.Stop()
 			return operation, ctx.Err()
 		case <-timer.C:
+			interval = nextBulkPollInterval(interval)
+		case <-deadline.C:
+			timer.Stop()
+			return operation, fmt.Errorf("bulk operation %s did not complete within %s; check it with: cf-redirect status %s", operation.ID, BulkWaitTimeout, operation.ID)
 		}
 	}
+}
+
+func nextBulkPollInterval(current time.Duration) time.Duration {
+	if current >= MaxBulkPollInterval {
+		return MaxBulkPollInterval
+	}
+	next := current * 2
+	if next > MaxBulkPollInterval {
+		return MaxBulkPollInterval
+	}
+	return next
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, destination any) error {
@@ -242,52 +285,136 @@ func (c *Client) do(ctx context.Context, method, path string, body any, destinat
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	var reader io.Reader
+	// Marshal once; a non-nil body is replayed for each retry attempt.
+	var bodyBytes []byte
 	if body != nil {
-		encoded, err := json.Marshal(body)
+		var err error
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("encode request: %w", err)
 		}
-		reader = bytes.NewReader(encoded)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
 	}
 	httpClient := c.HTTPClient
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		httpClient = defaultClient
 	}
-	response, err := httpClient.Do(req)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		var reader io.Reader
+		if bodyBytes != nil {
+			reader = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, baseURL+path, reader)
+		if err != nil {
+			return fmt.Errorf("build request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Accept", "application/json")
+		if bodyBytes != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		response, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		payload, readErr := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+		response.Body.Close()
+		if readErr != nil {
+			return fmt.Errorf("read response: %w", readErr)
+		}
+		if retryable(response.StatusCode) && attempt < maxRetries {
+			lastErr = &APIError{StatusCode: response.StatusCode, Errors: parseErrors(payload), Body: strings.TrimSpace(string(payload))}
+			if !sleep(ctx, backoffFor(response.Header, attempt)) {
+				return ctx.Err()
+			}
+			continue
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return &APIError{StatusCode: response.StatusCode, Errors: parseErrors(payload), Body: strings.TrimSpace(string(payload))}
+		}
+		if err := json.Unmarshal(payload, destination); err != nil {
+			return fmt.Errorf("decode response: %w", err)
+		}
+		// All used destination types are envelopes. Decode this small projection to
+		// enforce API-level success independently of HTTP status.
+		var status struct {
+			Success bool      `json:"success"`
+			Errors  []Message `json:"errors"`
+		}
+		if err := json.Unmarshal(payload, &status); err == nil && !status.Success {
+			return &APIError{StatusCode: response.StatusCode, Errors: status.Errors, Body: strings.TrimSpace(string(payload))}
+		}
+		return nil
 	}
-	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+	return lastErr
+}
+
+const (
+	// maxRetries bounds automatic retries for transient Cloudflare errors.
+	maxRetries = 5
+	// baseBackoff is the starting delay; each attempt doubles it.
+	baseBackoff = 400 * time.Millisecond
+	// maxBackoff caps the per-attempt delay and any Retry-After hint.
+	maxBackoff = 8 * time.Second
+)
+
+// retryable reports whether a response should be retried: rate limits and
+// server-side failures are transient under Cloudflare's load balancing.
+func retryable(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
+// retryAfter extracts Cloudflare's Retry-After hint when present.
+func retryAfter(h http.Header) time.Duration {
+	value := h.Get("Retry-After")
+	if value == "" {
+		return 0
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		var failed envelope[json.RawMessage]
-		_ = json.Unmarshal(payload, &failed)
-		return &APIError{StatusCode: response.StatusCode, Errors: failed.Errors, Body: strings.TrimSpace(string(payload))}
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
 	}
-	if err := json.Unmarshal(payload, destination); err != nil {
-		return fmt.Errorf("decode response: %w", err)
+	if when, err := http.ParseTime(value); err == nil {
+		if d := time.Until(when); d > 0 {
+			return d
+		}
 	}
-	// All used destination types are envelopes. Decode this small projection to
-	// enforce API-level success independently of HTTP status.
-	var status struct {
-		Success bool      `json:"success"`
-		Errors  []Message `json:"errors"`
+	return 0
+}
+
+// backoffFor returns the wait before the given retry attempt, preferring
+// Cloudflare's hint and adding jitter to avoid synchronized bursts.
+func backoffFor(h http.Header, attempt int) time.Duration {
+	delay := baseBackoff << attempt
+	if delay > maxBackoff {
+		delay = maxBackoff
 	}
-	if err := json.Unmarshal(payload, &status); err == nil && !status.Success {
-		return &APIError{StatusCode: response.StatusCode, Errors: status.Errors, Body: strings.TrimSpace(string(payload))}
+	if hint := retryAfter(h); hint > 0 {
+		if hint > maxBackoff {
+			hint = maxBackoff
+		}
+		delay = hint
+	}
+	jitter := time.Duration(rand.IntN(int(delay / 4)))
+	return delay + jitter
+}
+
+// sleep waits for d, aborting early when the context is cancelled.
+func sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// parseErrors decodes the error array from a Cloudflare error envelope.
+func parseErrors(payload []byte) []Message {
+	var failed envelope[json.RawMessage]
+	if err := json.Unmarshal(payload, &failed); err == nil {
+		return failed.Errors
 	}
 	return nil
 }
@@ -305,8 +432,23 @@ func fromDomain(r domain.Redirect) RedirectItem {
 }
 
 func (r RedirectItem) domain() domain.Redirect {
-	return domain.Redirect{ID: r.ID, Source: r.Redirect.SourceURL, Target: r.Redirect.TargetURL,
+	// Remote data must never carry terminal control sequences into any output.
+	return domain.Redirect{ID: r.ID, Source: sanitize(r.Redirect.SourceURL), Target: sanitize(r.Redirect.TargetURL),
 		StatusCode: r.Redirect.StatusCode, IncludeSubdomains: r.Redirect.IncludeSubdomains,
 		SubpathMatching: r.Redirect.SubpathMatching, PreserveQueryString: r.Redirect.PreserveQueryString,
-		PreservePathSuffix: r.Redirect.PreservePathSuffix, Comment: r.Comment}
+		PreservePathSuffix: r.Redirect.PreservePathSuffix, Comment: sanitize(r.Comment)}
+}
+
+// sanitize removes control characters so remote text cannot inject terminal
+// escape sequences or corrupt structured output.
+func sanitize(value string) string {
+	if !strings.ContainsFunc(value, func(r rune) bool { return unicode.IsControl(r) }) {
+		return value
+	}
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
 }

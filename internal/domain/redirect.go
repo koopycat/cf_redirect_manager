@@ -54,7 +54,7 @@ func validateSourceURL(value string) error {
 		candidate = "https://" + value
 	}
 	u, err := url.ParseRequestURI(candidate)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Hostname() == "" {
 		return fmt.Errorf("source must be an absolute or schemeless URL with a hostname")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
@@ -71,7 +71,7 @@ func validateTargetURL(value string) error {
 		return err
 	}
 	u, err := url.ParseRequestURI(value)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
 		return fmt.Errorf("target must be an absolute URL")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {

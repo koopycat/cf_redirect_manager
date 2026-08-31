@@ -13,7 +13,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 	"unicode"
 
 	"github.com/spf13/cobra"
@@ -215,11 +214,34 @@ func makeMutation(cmd *cobra.Command, o *options, dryRun, yes bool, createPlan f
 			return nil
 		}
 	}
-	report, err := (app.Executor{API: api, AccountID: cfg.AccountID, ListID: cfg.ListID, PollInterval: 500 * time.Millisecond}).Apply(cmd.Context(), plan)
+	report, err := (app.Executor{API: api, AccountID: cfg.AccountID, ListID: cfg.ListID, PollInterval: cloudflare.DefaultBulkPollInterval}).Apply(cmd.Context(), plan)
 	if err != nil {
+		// Print every phase result so a failure is diagnosable instead of a
+		// single terse error line, and include recovery hints.
+		for _, phase := range report.Phases {
+			if phase.Err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "phase %s: FAILED (%d requested): %v\n", phase.Phase, phase.Requested, phase.Err)
+			} else {
+				fmt.Fprintf(cmd.ErrOrStderr(), "phase %s: completed (%d requested, operation %s)\n", phase.Phase, phase.Requested, phase.Operation.ID)
+			}
+		}
+		var execErr *app.ExecutionError
+		if errors.As(err, &execErr) {
+			fmt.Fprintln(cmd.ErrOrStderr(), "The plan may be partially applied; run cf-redirect list to verify.")
+		}
+		var apiErr *cloudflare.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 429 {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Cloudflare rate limit: the token's rolling request budget is exhausted; wait a few minutes and retry.")
+		}
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Applied %d operation phase(s).\n", len(report.Phases))
+	for _, phase := range report.Phases {
+		if phase.Err != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Phase %s: FAILED (%d requested): %v\n", phase.Phase, phase.Requested, phase.Err)
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Phase %s: applied %d item(s) (operation %s)\n", phase.Phase, phase.Requested, phase.Operation.ID)
+	}
 	return nil
 }
 
@@ -250,18 +272,43 @@ func isTerminal(cmd *cobra.Command) bool {
 	return iok && ook && term.IsTerminal(int(i.Fd())) && term.IsTerminal(int(o.Fd()))
 }
 
+// readPasswordInteractive prompts on stderr and reads a hidden value from the
+// terminal stdin stream Cobra provides. It requires only stdin to be a TTY, so
+// piping stdout does not silently swallow the prompt.
+func readPasswordInteractive(cmd *cobra.Command, prompt string) (string, error) {
+	in, ok := cmd.InOrStdin().(*os.File)
+	if !ok || !term.IsTerminal(int(in.Fd())) {
+		return "", fmt.Errorf("login requires a running terminal; pipe the token with --token-stdin")
+	}
+	if _, err := fmt.Fprint(cmd.ErrOrStderr(), prompt); err != nil {
+		return "", err
+	}
+	defer fmt.Fprintln(cmd.ErrOrStderr())
+	value, err := term.ReadPassword(int(in.Fd()))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(value)), nil
+}
+
 func renderPlan(w io.Writer, plan planner.Plan) error {
+	// Render into a buffer first so a failing output can never let a mutation
+	// proceed without its required plan preview.
+	var b strings.Builder
 	adds, updates, deletes := plan.Counts()
-	fmt.Fprintf(w, "Plan: %d add, %d update, %d delete\n", adds, updates, deletes)
+	fmt.Fprintf(&b, "Plan: %d add, %d update, %d delete\n", adds, updates, deletes)
 	for _, c := range plan.Changes {
 		switch c.Kind {
 		case planner.Add:
-			fmt.Fprintf(w, "+ %s -> %s\n", c.After.Source, c.After.Target)
+			fmt.Fprintf(&b, "+ %s -> %s\n", c.After.Source, c.After.Target)
 		case planner.Update:
-			fmt.Fprintf(w, "~ %s -> %s => %s -> %s\n", c.Before.Source, c.Before.Target, c.After.Source, c.After.Target)
+			fmt.Fprintf(&b, "~ %s -> %s => %s -> %s\n", c.Before.Source, c.Before.Target, c.After.Source, c.After.Target)
 		case planner.Delete:
-			fmt.Fprintf(w, "- %s\n", c.Before.Source)
+			fmt.Fprintf(&b, "- %s\n", c.Before.Source)
 		}
+	}
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		return fmt.Errorf("write plan: %w", err)
 	}
 	return nil
 }
@@ -354,16 +401,10 @@ func loginCmd(o *options) *cobra.Command {
 			}
 			token = strings.TrimSpace(string(data))
 		} else {
-			if !isTerminal(cmd) {
-				return fmt.Errorf("login requires a terminal or --token-stdin")
+			token, err = readPasswordInteractive(cmd, "Cloudflare API token: ")
+			if err != nil {
+				return err
 			}
-			fmt.Fprint(cmd.OutOrStdout(), "Cloudflare API token: ")
-			bytes, readErr := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Fprintln(cmd.OutOrStdout())
-			if readErr != nil {
-				return readErr
-			}
-			token = strings.TrimSpace(string(bytes))
 		}
 		if token == "" {
 			return fmt.Errorf("API token must not be empty")

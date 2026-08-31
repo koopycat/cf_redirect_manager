@@ -1,0 +1,3 @@
+source,target
+example.com/test-import-one/,https://www.example.com/destination-one/
+example.com/test-import-two/,https://www.example.com/destination-two/

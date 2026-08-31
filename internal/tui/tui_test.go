@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +12,28 @@ import (
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
 )
+
+func TestApplyErrorPersistsThroughReloadUntilDismissed(t *testing.T) {
+	m := newModel(nil, "account", "list")
+	m.width = 80
+	m.height = 24
+	// Simulate: apply fails, then a successful reload arrives. The error must
+	// survive the reload so the user can read it.
+	first, _ := m.Update(appliedMsg{err: errors.New("bulk operation ended with status failed")})
+	second, _ := first.Update(loadedMsg{items: nil, err: nil})
+	got := second.(model)
+	if got.err == nil {
+		t.Fatal("apply error was cleared by the reload before the user read it")
+	}
+	if !strings.Contains(got.View(), "bulk operation ended with status failed") {
+		t.Fatal("error message not visible in the TUI view")
+	}
+	// Any key acknowledges and hides the error.
+	third, _ := got.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")})
+	if third.(model).err != nil {
+		t.Fatal("error not dismissed by a key")
+	}
+}
 
 func TestFilterSearchesSourceTargetAndComment(t *testing.T) {
 	m := newModel(nil, "account", "list")
@@ -65,14 +90,49 @@ func TestPlanRequiresYAndSanitizesComments(t *testing.T) {
 	}
 }
 
-func TestQuitDuringApplyDoesNotExit(t *testing.T) {
+func TestQuitDuringApplyCancelsLocalWait(t *testing.T) {
 	m := newModel(nil, "account", "list")
 	m.loading = false
 	m.applying = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m.applyCancel = cancel
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	got := updated.(model)
-	if cmd != nil || !got.applying || !strings.Contains(got.status, "continues") {
-		t.Fatalf("quit changed apply state: applying=%v status=%q cmd=%v", got.applying, got.status, cmd)
+	if cmd != nil || !got.applying || got.applyCancel != nil || !strings.Contains(got.status, "Stopping local wait") {
+		t.Fatalf("quit did not start cancellation: applying=%v status=%q cmd=%v", got.applying, got.status, cmd)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatal("apply context was not cancelled")
+	}
+}
+
+func TestCancelledApplyShowsHonestExitMessage(t *testing.T) {
+	m := newModel(nil, "account", "list")
+	m.loading = false
+	m.applying = true
+	updated, _ := m.Update(appliedMsg{err: fmt.Errorf("apply plan: %w", context.Canceled)})
+	got := updated.(model)
+	if got.applying || !got.interrupted || got.loading || !strings.Contains(got.status, "Cloudflare operation may still finish") {
+		t.Fatalf("cancelled apply state: applying=%v interrupted=%v loading=%v status=%q", got.applying, got.interrupted, got.loading, got.status)
+	}
+	_, cmd := got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("q must exit after local wait is cancelled")
+	}
+}
+
+func TestApplyingViewShowsLiveProgress(t *testing.T) {
+	m := newModel(nil, "account", "list")
+	m.width = 100
+	m.height = 30
+	m.loading = false
+	m.applying = true
+	m.progress.set("create phase: waiting for operation op-123…")
+	view := m.View()
+	for _, want := range []string{"create phase", "op-123", "q/esc stops waiting locally"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("applying view missing %q: %q", want, view)
+		}
 	}
 }
 

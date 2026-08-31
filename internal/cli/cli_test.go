@@ -2,11 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
+	"github.com/spf13/cobra"
 )
 
 func TestRenderPlanIncludesDeterministicMarkersAndCounts(t *testing.T) {
@@ -27,6 +30,30 @@ func TestRenderPlanIncludesDeterministicMarkersAndCounts(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("plan output %q does not contain %q", output.String(), want)
 		}
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
+
+// A failing output must never let a mutation proceed without a visible plan.
+func TestRenderPlanFailsOnWriterError(t *testing.T) {
+	added := domain.New("https://add.example", "https://target.example")
+	plan := planner.Plan{Changes: []planner.Change{{Kind: planner.Add, After: &added}}}
+	if err := renderPlan(failingWriter{}, plan); err == nil {
+		t.Fatal("renderPlan must report a failing output writer")
+	}
+}
+
+// Non-terminal stdin must trigger a clear error instead of a hidden prompt.
+func TestReadPasswordInteractiveRequiresTTY(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetIn(strings.NewReader("not-a-tty\n"))
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if _, err := readPasswordInteractive(cmd, "Cloudflare API token: "); err == nil {
+		t.Fatal("readPasswordInteractive must fail when stdin is not a terminal")
 	}
 }
 

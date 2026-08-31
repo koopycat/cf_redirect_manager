@@ -25,6 +25,9 @@ type Executor struct {
 	AccountID    string
 	ListID       string
 	PollInterval time.Duration
+	// Progress, when non-nil, receives a short human-readable message at each
+	// stage of an apply so live UIs can show what is happening while waiting.
+	Progress func(message string)
 }
 
 type Phase string
@@ -72,8 +75,15 @@ func (e *ExecutionError) Error() string {
 }
 func (e *ExecutionError) Unwrap() error { return e.Err }
 
+// report forwards a stage message to the optional progress hook.
+func (e Executor) report(message string) {
+	if e.Progress != nil {
+		e.Progress(message)
+	}
+}
+
 // Apply fetches fresh list state, proves that the planned assumptions still
-// hold, then deletes explicit deletions and old update entries. It waits for
+// hold, then explicitly deletes removed and superseded entries. It waits for
 // that operation before creating additions and update replacements.
 func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) {
 	report := Report{}
@@ -87,6 +97,7 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 		report.Revalidated = true
 		return report, nil
 	}
+	e.report("reading current list to verify the plan…")
 	current, err := e.API.ListItems(ctx, e.AccountID, e.ListID)
 	if err != nil {
 		return report, &ExecutionError{Report: report, Err: fmt.Errorf("revalidate list: %w", err)}
@@ -98,10 +109,14 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 
 	deleteIDs, creates := split(plan)
 	if len(deleteIDs) > 0 {
+		e.report(fmt.Sprintf("delete phase: removing %d item(s)…", len(deleteIDs)))
 		result := PhaseResult{Phase: DeletePhase, Requested: len(deleteIDs)}
 		operation, err := e.API.DeleteItems(ctx, e.AccountID, e.ListID, deleteIDs)
 		result.Operation = operation
 		if err == nil {
+			if operation.ID != "" {
+				e.report(fmt.Sprintf("delete phase: waiting for operation %s…", operation.ID))
+			}
 			operation, err = e.API.WaitBulkOperation(ctx, e.AccountID, operation.ID, e.PollInterval)
 			result.Operation = operation
 		}
@@ -115,10 +130,14 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 	}
 
 	if len(creates) > 0 {
+		e.report(fmt.Sprintf("create phase: adding %d item(s)…", len(creates)))
 		result := PhaseResult{Phase: CreatePhase, Requested: len(creates)}
 		operation, err := e.API.CreateItems(ctx, e.AccountID, e.ListID, creates)
 		result.Operation = operation
 		if err == nil {
+			if operation.ID != "" {
+				e.report(fmt.Sprintf("create phase: waiting for operation %s…", operation.ID))
+			}
 			operation, err = e.API.WaitBulkOperation(ctx, e.AccountID, operation.ID, e.PollInterval)
 			result.Operation = operation
 		}
