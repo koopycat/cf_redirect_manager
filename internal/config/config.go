@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,17 +23,43 @@ type Config struct {
 	ListID    string `json:"list_id"`
 }
 
-// Resolve applies precedence flags > environment > persisted config.
+// Resolve applies precedence flags > environment > persisted config. The
+// persisted file is consulted only when flags and environment do not already
+// provide a complete identity, so a corrupt file cannot block higher-precedence
+// overrides.
 func Resolve(accountID, listID string) (Config, error) {
-	path, err := Path()
-	if err != nil {
-		return Config{}, err
+	cfg := Config{AccountID: strings.TrimSpace(accountID), ListID: strings.TrimSpace(listID)}
+	if cfg.AccountID == "" {
+		cfg.AccountID, _ = os.LookupEnv(AccountIDEnv)
+		cfg.AccountID = strings.TrimSpace(cfg.AccountID)
 	}
-	fileConfig, err := Load(path)
-	if err != nil {
-		return Config{}, err
+	if cfg.ListID == "" {
+		cfg.ListID, _ = os.LookupEnv(ListIDEnv)
+		cfg.ListID = strings.TrimSpace(cfg.ListID)
 	}
-	return ResolveValues(accountID, listID, os.LookupEnv, fileConfig)
+	if cfg.AccountID == "" || cfg.ListID == "" {
+		path, err := Path()
+		if err != nil {
+			return Config{}, err
+		}
+		fileConfig, err := Load(path)
+		if err != nil {
+			return Config{}, err
+		}
+		if cfg.AccountID == "" {
+			cfg.AccountID = strings.TrimSpace(fileConfig.AccountID)
+		}
+		if cfg.ListID == "" {
+			cfg.ListID = strings.TrimSpace(fileConfig.ListID)
+		}
+	}
+	if cfg.AccountID == "" {
+		return Config{}, fmt.Errorf("Cloudflare account ID is required (flag, %s, or config file)", AccountIDEnv)
+	}
+	if cfg.ListID == "" {
+		return Config{}, fmt.Errorf("Cloudflare list ID is required (flag, %s, or config file)", ListIDEnv)
+	}
+	return cfg, nil
 }
 
 // ResolveWithLookup is retained for callers that only need flags and env.
@@ -84,6 +111,10 @@ func Load(path string) (Config, error) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return Config{}, fmt.Errorf("decode config %s: trailing data after JSON object", path)
 	}
 	cfg.AccountID = strings.TrimSpace(cfg.AccountID)
 	cfg.ListID = strings.TrimSpace(cfg.ListID)

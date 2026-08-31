@@ -23,10 +23,14 @@ just build
 
 ## Configuration
 
-Persist the account and list IDs in the OS user config directory (`$XDG_CONFIG_HOME/cf-redirect/config.json` on supported Unix systems):
+From a Bulk Redirects dashboard URL such as `https://dash.cloudflare.com/2629cf85d55899c0223eb91fbde5490d/vkoop.de/rules/settings/bulk-redirects/redirect-list/dc4ec1437f18495db6fe771e53edb478/add-redirects`, the account ID is the first 32-hex segment and the list ID is the last one (the zone in the middle is only dashboard navigation context — Bulk Redirect Lists are account-level resources).
+
+Persist the IDs in the OS user config directory (`$XDG_CONFIG_HOME/cf-redirect/config.json` on supported Unix systems):
 
 ```sh
-cf-redirect config set --account-id ACCOUNT_ID --list-id LIST_ID
+cf-redirect config set \
+  --account-id 2629cf85d55899c0223eb91fbde5490d \
+  --list-id dc4ec1437f18495db6fe771e53edb478
 cf-redirect config show
 ```
 

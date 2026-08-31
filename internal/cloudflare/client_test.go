@@ -127,6 +127,68 @@ func TestCreateAndDeleteUseOnlyPOSTAndDELETE(t *testing.T) {
 	}
 }
 
+func TestDoRetriesOnRateLimitAndSucceeds(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []any{map[string]any{"code": 10021, "message": "you have been ratelimited please wait and try again"}}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []any{}})
+	}))
+	defer server.Close()
+	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
+	var result envelope[[]json.RawMessage]
+	if err := client.do(context.Background(), http.MethodGet, "/x", nil, &result); err != nil {
+		t.Fatalf("do after rate limit retry: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected one retry, got %d calls", calls.Load())
+	}
+}
+
+func TestDoDoesNotRetryAuthFailure(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []any{map[string]any{"code": 9109, "message": "not authorized"}}})
+	}))
+	defer server.Close()
+	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
+	var result envelope[[]json.RawMessage]
+	err := client.do(context.Background(), http.MethodGet, "/x", nil, &result)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("auth failure must not be retried, got %d calls", calls.Load())
+	}
+}
+
+func TestDoRetriesOtherTransientStatuses(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []any{}})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []any{}})
+	}))
+	defer server.Close()
+	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
+	var result envelope[[]json.RawMessage]
+	if err := client.do(context.Background(), http.MethodGet, "/x", nil, &result); err != nil {
+		t.Fatalf("do after 500 retries: %v", err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("expected two retries, got %d calls", calls.Load())
+	}
+}
+
 func TestWaitBulkOperation(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +203,17 @@ func TestWaitBulkOperation(t *testing.T) {
 	op, err := client.WaitBulkOperation(context.Background(), "account", "op", time.Millisecond)
 	if err != nil || op.Status != "completed" || calls.Load() != 2 {
 		t.Fatalf("Wait = %#v, %v, calls %d", op, err, calls.Load())
+	}
+}
+
+func TestBulkPollIntervalBacksOffExponentiallyAndCaps(t *testing.T) {
+	interval := time.Second
+	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 8 * time.Second}
+	for i, expected := range want {
+		interval = nextBulkPollInterval(interval)
+		if interval != expected {
+			t.Fatalf("step %d: interval = %s, want %s", i+1, interval, expected)
+		}
 	}
 }
 

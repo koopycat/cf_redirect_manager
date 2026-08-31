@@ -3,9 +3,10 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
-	"time"
+	"sync"
 	"unicode"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/koopycat/cf-redirect/internal/app"
+	"github.com/koopycat/cf-redirect/internal/cloudflare"
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
 )
@@ -37,6 +39,23 @@ type loadedMsg struct {
 	err   error
 }
 type appliedMsg struct{ err error }
+
+type progressTracker struct {
+	mu      sync.RWMutex
+	message string
+}
+
+func (p *progressTracker) set(message string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.message = message
+}
+
+func (p *progressTracker) get() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.message
+}
 
 type mode int
 
@@ -74,6 +93,9 @@ type model struct {
 	plan              planner.Plan
 	loading           bool
 	applying          bool
+	applyCancel       context.CancelFunc
+	progress          *progressTracker
+	interrupted       bool
 	err               error
 	status            string
 	width, height     int
@@ -100,7 +122,7 @@ func newModel(client api, accountID, listID string) model {
 	target.CharLimit = 2048
 	s := spinner.New()
 	s.Spinner = spinner.Line
-	return model{api: client, accountID: accountID, listID: listID, input: input, source: source, target: target, spin: s, help: help.New(), keys: newKeys(), loading: true}
+	return model{api: client, accountID: accountID, listID: listID, input: input, source: source, target: target, spin: s, help: help.New(), keys: newKeys(), loading: true, progress: &progressTracker{}}
 }
 func (m model) Init() tea.Cmd { return tea.Batch(m.spin.Tick, m.load()) }
 func (m model) load() tea.Cmd {
@@ -109,10 +131,18 @@ func (m model) load() tea.Cmd {
 		return loadedMsg{items, err}
 	}
 }
-func (m model) apply() tea.Cmd {
+func (m model) apply(ctx context.Context) tea.Cmd {
 	plan := m.plan
+	progress := m.progress
 	return func() tea.Msg {
-		_, err := (app.Executor{API: m.api, AccountID: m.accountID, ListID: m.listID, PollInterval: 500 * time.Millisecond}).Apply(context.Background(), plan)
+		executor := app.Executor{
+			API:          m.api,
+			AccountID:    m.accountID,
+			ListID:       m.listID,
+			PollInterval: cloudflare.DefaultBulkPollInterval,
+			Progress:     progress.set,
+		}
+		_, err := executor.Apply(ctx, plan)
 		return appliedMsg{err}
 	}
 }
@@ -125,12 +155,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.source.Width = max(20, v.Width-14)
 		m.target.Width = max(20, v.Width-14)
 	case spinner.TickMsg:
+		if !m.loading && !m.applying {
+			break
+		}
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(v)
 		cmds = append(cmds, cmd)
 	case loadedMsg:
 		m.loading = false
-		m.err = v.err
+		// Only adopt a new load error; never clear an apply error the user has
+		// not had a chance to read yet.
+		if v.err != nil {
+			m.err = v.err
+		}
 		if v.err == nil {
 			m.items = v.items
 			m.status = fmt.Sprintf("%d redirects", len(v.items))
@@ -140,20 +177,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case appliedMsg:
 		m.applying = false
+		if m.applyCancel != nil {
+			m.applyCancel()
+			m.applyCancel = nil
+		}
+		m.mode = listMode
+		m.plan = planner.Plan{}
+		if errors.Is(v.err, context.Canceled) {
+			m.err = nil
+			m.interrupted = true
+			m.status = "Stopped waiting locally; a submitted Cloudflare operation may still finish. Press q/esc to exit, then reopen to verify."
+			break
+		}
 		if v.err != nil {
 			m.err = v.err
 			m.status = "Apply failed"
 		} else {
 			m.err = nil
 			m.status = "Plan applied"
-			m.mode = listMode
-			m.loading = true
-			cmds = append(cmds, m.load())
 		}
+		// Reload remote state on success or failure so the editor cannot
+		// silently retry an invalid plan.
+		m.loading = true
+		cmds = append(cmds, m.load())
 	case tea.KeyMsg:
 		if m.applying {
-			if key.Matches(v, m.keys.quit) {
-				m.status = "Apply continues; wait for Cloudflare to finish"
+			if key.Matches(v, m.keys.quit) || key.Matches(v, m.keys.cancel) {
+				if m.applyCancel != nil {
+					m.applyCancel()
+					m.applyCancel = nil
+					m.status = "Stopping local wait; Cloudflare may still finish a submitted operation…"
+				}
 			}
 			break
 		}
@@ -161,6 +215,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if key.Matches(v, m.keys.quit) {
 				return m, tea.Quit
 			}
+			break
+		}
+		if m.interrupted {
+			if key.Matches(v, m.keys.quit) || key.Matches(v, m.keys.cancel) {
+				return m, tea.Quit
+			}
+			break
+		}
+		// A visible error is a modal screen: any key acknowledges it. The full
+		// message stays on screen until the user has read it.
+		if m.err != nil {
+			m.err = nil
 			break
 		}
 		if m.mode == searchMode {
@@ -200,9 +266,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == planMode {
 			if strings.EqualFold(v.String(), "y") {
+				ctx, cancel := context.WithCancel(context.Background())
 				m.applying = true
-				m.status = "Applying plan; quitting is disabled until Cloudflare finishes"
-				cmds = append(cmds, m.apply())
+				m.applyCancel = cancel
+				m.progress = &progressTracker{}
+				m.status = "Starting apply… · q/esc stops waiting locally"
+				cmds = append(cmds, m.apply(ctx))
 			}
 			if key.Matches(v, m.keys.cancel) {
 				m.mode = listMode
@@ -324,21 +393,83 @@ func (m model) View() string {
 		body = m.listView()
 	}
 	state := m.status
+	if m.applying && m.progress != nil {
+		if progress := m.progress.get(); progress != "" {
+			state = progress + " · q/esc stops waiting locally"
+		}
+	}
 	if m.loading || m.applying {
 		state = m.spin.View() + " " + state
 	}
 	if m.err != nil {
-		state = lipgloss.NewStyle().Foreground(red).Render("Error: " + safeTerminalText(m.err.Error()))
+		// Errors render as a dedicated block the user must acknowledge, so the
+		// full message stays on screen instead of flashing past in the status.
+		body = errorView(m.err, m.width)
 	}
 	return header + "\n" + mutedStyle.Render(state) + "\n\n" + body + "\n\n" + m.help.View(m.keys)
+}
+
+// errorView renders an error the user can read at their own pace. It is shown
+// until any key is pressed (see Update), so long Cloudflare messages no longer
+// flash by.
+func errorView(err error, width int) string {
+	w := width - 6
+	if w < 24 {
+		w = 24
+	}
+	msg := wrapText(safeTerminalText(err.Error()), w)
+	title := lipgloss.NewStyle().Foreground(red).Bold(true).Render("Error")
+	block := lipgloss.NewStyle().Foreground(red).Render(msg)
+	return title + "\n\n" + block + "\n\n" + mutedStyle.Render("Press any key to dismiss")
+}
+
+// wrapText breaks long text at word boundaries to fit a width.
+func wrapText(text string, width int) string {
+	var b strings.Builder
+	col := 0
+	for _, tok := range strings.Fields(text) {
+		if col > 0 && col+len(tok)+1 > width {
+			b.WriteByte('\n')
+			col = 0
+		}
+		if col > 0 {
+			b.WriteByte(' ')
+			col++
+		}
+		b.WriteString(tok)
+		col += len(tok)
+	}
+	return b.String()
 }
 func (m model) listView() string {
 	items := m.filtered()
 	if len(items) == 0 {
 		return mutedStyle.Render("No redirects match.")
 	}
+	linesPerItem := 1
+	if m.width < 75 {
+		linesPerItem = 2
+	}
+	// Reserve room for header, status, help, and margins. When the list is
+	// taller than the terminal, show a window centered on the selection.
+	perPage := (m.height - 7) / linesPerItem
+	if perPage < 5 {
+		perPage = 5
+	}
+	start := m.selected - perPage/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + perPage
+	if end > len(items) {
+		end = len(items)
+		if end-perPage > 0 {
+			start = end - perPage
+		}
+	}
 	var b strings.Builder
-	for n, item := range items {
+	for n := start; n < end; n++ {
+		item := items[n]
 		line := item.Source + "  " + mutedStyle.Render("→") + "  " + item.Target
 		if m.width < 75 {
 			line = item.Source + "\n  " + mutedStyle.Render("→ ") + item.Target
@@ -350,7 +481,7 @@ func (m model) listView() string {
 		}
 		b.WriteString(line)
 		if item.Comment != "" {
-			b.WriteString("  " + mutedStyle.Render(safeTerminalText(item.Comment)))
+			b.WriteString("  " + mutedStyle.Render(item.Comment))
 		}
 		b.WriteByte('\n')
 	}
