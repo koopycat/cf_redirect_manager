@@ -1,32 +1,69 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestResolvePrecedence(t *testing.T) {
-	env := map[string]string{AccountIDEnv: "env-account", ListIDEnv: "env-list"}
-	lookup := func(key string) (string, bool) { value, ok := env[key]; return value, ok }
-	got, err := ResolveWithLookup("flag-account", "", lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AccountID != "flag-account" || got.ListID != "env-list" {
-		t.Fatalf("unexpected config: %#v", got)
-	}
-}
-
-func TestResolveValuesPrecedenceFlagsThenEnvThenFile(t *testing.T) {
+func TestResolvePrecedenceFlagsThenEnvThenFile(t *testing.T) {
 	env := map[string]string{AccountIDEnv: "env-account"}
 	lookup := func(key string) (string, bool) { value, ok := env[key]; return value, ok }
-	got, err := ResolveValues("flag-account", "", lookup, Config{AccountID: "file-account", ListID: "file-list"})
+	got, err := resolve(" flag-account ", "", lookup, func() (Config, error) {
+		return Config{AccountID: "file-account", ListID: " file-list "}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.AccountID != "flag-account" || got.ListID != "file-list" {
 		t.Fatalf("unexpected config: %#v", got)
+	}
+}
+
+func TestResolveSkipsFileWhenFlagsAndEnvironmentAreComplete(t *testing.T) {
+	lookup := func(key string) (string, bool) {
+		if key == ListIDEnv {
+			return "env-list", true
+		}
+		return "", false
+	}
+	got, err := resolve("flag-account", "", lookup, func() (Config, error) {
+		return Config{}, errors.New("corrupt config must not be loaded")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (Config{AccountID: "flag-account", ListID: "env-list"}) {
+		t.Fatalf("unexpected config: %#v", got)
+	}
+}
+
+func TestResolveRequiresBothIDs(t *testing.T) {
+	lookup := func(string) (string, bool) { return "", false }
+	load := func() (Config, error) { return Config{}, nil }
+	if _, err := resolve("", "list", lookup, load); err == nil {
+		t.Fatal("expected missing account error")
+	}
+	if _, err := resolve("account", "", lookup, load); err == nil {
+		t.Fatal("expected missing list error")
+	}
+}
+
+func TestLoadRejectsUnknownFieldsAndTrailingJSON(t *testing.T) {
+	for name, content := range map[string]string{
+		"unknown":  `{"account_id":"account","list_id":"list","extra":true}`,
+		"trailing": `{"account_id":"account","list_id":"list"} {}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected strict JSON error")
+			}
+		})
 	}
 }
 
@@ -50,15 +87,5 @@ func TestSaveIsAtomicAndPrivate(t *testing.T) {
 	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".config-*"))
 	if err != nil || len(matches) != 0 {
 		t.Fatalf("temporary files remain: %v, %v", matches, err)
-	}
-}
-
-func TestResolveRequiresBothIDs(t *testing.T) {
-	lookup := func(string) (string, bool) { return "", false }
-	if _, err := ResolveWithLookup("", "list", lookup); err == nil {
-		t.Fatal("expected missing account error")
-	}
-	if _, err := ResolveWithLookup("account", "", lookup); err == nil {
-		t.Fatal("expected missing list error")
 	}
 }
