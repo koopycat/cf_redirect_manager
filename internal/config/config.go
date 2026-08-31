@@ -28,59 +28,37 @@ type Config struct {
 // provide a complete identity, so a corrupt file cannot block higher-precedence
 // overrides.
 func Resolve(accountID, listID string) (Config, error) {
-	cfg := Config{AccountID: strings.TrimSpace(accountID), ListID: strings.TrimSpace(listID)}
-	if cfg.AccountID == "" {
-		cfg.AccountID, _ = os.LookupEnv(AccountIDEnv)
-		cfg.AccountID = strings.TrimSpace(cfg.AccountID)
-	}
-	if cfg.ListID == "" {
-		cfg.ListID, _ = os.LookupEnv(ListIDEnv)
-		cfg.ListID = strings.TrimSpace(cfg.ListID)
-	}
-	if cfg.AccountID == "" || cfg.ListID == "" {
+	return resolve(accountID, listID, os.LookupEnv, func() (Config, error) {
 		path, err := Path()
 		if err != nil {
 			return Config{}, err
 		}
-		fileConfig, err := Load(path)
+		return Load(path)
+	})
+}
+
+func resolve(accountID, listID string, lookup func(string) (string, bool), load func() (Config, error)) (Config, error) {
+	cfg := Config{AccountID: strings.TrimSpace(accountID), ListID: strings.TrimSpace(listID)}
+	if cfg.AccountID == "" {
+		cfg.AccountID, _ = lookup(AccountIDEnv)
+		cfg.AccountID = strings.TrimSpace(cfg.AccountID)
+	}
+	if cfg.ListID == "" {
+		cfg.ListID, _ = lookup(ListIDEnv)
+		cfg.ListID = strings.TrimSpace(cfg.ListID)
+	}
+	if cfg.AccountID == "" || cfg.ListID == "" {
+		persisted, err := load()
 		if err != nil {
 			return Config{}, err
 		}
 		if cfg.AccountID == "" {
-			cfg.AccountID = strings.TrimSpace(fileConfig.AccountID)
+			cfg.AccountID = strings.TrimSpace(persisted.AccountID)
 		}
 		if cfg.ListID == "" {
-			cfg.ListID = strings.TrimSpace(fileConfig.ListID)
+			cfg.ListID = strings.TrimSpace(persisted.ListID)
 		}
 	}
-	if cfg.AccountID == "" {
-		return Config{}, fmt.Errorf("Cloudflare account ID is required (flag, %s, or config file)", AccountIDEnv)
-	}
-	if cfg.ListID == "" {
-		return Config{}, fmt.Errorf("Cloudflare list ID is required (flag, %s, or config file)", ListIDEnv)
-	}
-	return cfg, nil
-}
-
-// ResolveWithLookup is retained for callers that only need flags and env.
-func ResolveWithLookup(accountID, listID string, lookup func(string) (string, bool)) (Config, error) {
-	return ResolveValues(accountID, listID, lookup, Config{})
-}
-
-func ResolveValues(accountID, listID string, lookup func(string) (string, bool), fileConfig Config) (Config, error) {
-	if accountID == "" {
-		accountID, _ = lookup(AccountIDEnv)
-	}
-	if accountID == "" {
-		accountID = fileConfig.AccountID
-	}
-	if listID == "" {
-		listID, _ = lookup(ListIDEnv)
-	}
-	if listID == "" {
-		listID = fileConfig.ListID
-	}
-	cfg := Config{AccountID: strings.TrimSpace(accountID), ListID: strings.TrimSpace(listID)}
 	if cfg.AccountID == "" {
 		return Config{}, fmt.Errorf("Cloudflare account ID is required (flag, %s, or config file)", AccountIDEnv)
 	}
@@ -99,15 +77,17 @@ func Path() (string, error) {
 }
 
 func Load(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return Config{}, nil
 	}
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %s: %w", path, err)
 	}
+	defer file.Close()
+
 	var cfg Config
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config %s: %w", path, err)

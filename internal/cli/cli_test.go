@@ -9,6 +9,7 @@ import (
 
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
+	"github.com/koopycat/cf-redirect/internal/textsafe"
 	"github.com/spf13/cobra"
 )
 
@@ -68,11 +69,23 @@ func TestFindSourceRequiresExactMatchAndID(t *testing.T) {
 	}
 }
 
-func TestTerminalCommentSanitization(t *testing.T) {
-	if got := safeTerminalText("normal\x1b[31mred\x07\nline"); got != "normal[31mredline" {
-		t.Fatalf("safeTerminalText() = %q", got)
+func TestRenderPlanSanitizesRemoteText(t *testing.T) {
+	item := domain.New("source\x1b[2J", "target\x07")
+	plan := planner.Plan{Changes: []planner.Change{{Kind: planner.Add, After: &item}}}
+	var output bytes.Buffer
+	if err := renderPlan(&output, plan); err != nil {
+		t.Fatal(err)
 	}
-	items := []domain.Redirect{{Source: "example.com", Target: "https://target.example", StatusCode: 301, Comment: "unsafe\x1b[2Jcomment"}}
+	if strings.ContainsRune(output.String(), '\x1b') || strings.ContainsRune(output.String(), '\x07') {
+		t.Fatalf("plan output retained control characters: %q", output.String())
+	}
+}
+
+func TestTerminalCommentSanitization(t *testing.T) {
+	if got := textsafe.StripControls("normal\x1b[31mred\x07\nline"); got != "normal[31mredline" {
+		t.Fatalf("StripControls() = %q", got)
+	}
+	items := []domain.Redirect{{Source: "example.com\x1b[2J", Target: "https://target.example\x07", StatusCode: 301, Comment: "unsafe\x1b[2Jcomment"}}
 	for _, format := range []string{"table", "json", "csv"} {
 		var output bytes.Buffer
 		if err := renderRedirects(&output, items, format); err != nil {

@@ -29,29 +29,28 @@ func (f *fakeKeyring) Delete(_ string, user string) error {
 	return f.err
 }
 
+func testResolver(accountID string, store keyringStore, lookup func(string) (string, bool)) Resolver {
+	resolver := NewResolver(accountID)
+	resolver.keyring = store
+	resolver.lookupEnv = lookup
+	return resolver
+}
+
 func TestTokenEnvironmentPrecedesKeyring(t *testing.T) {
 	store := &fakeKeyring{value: "keyring-token", err: errors.New("must not be called")}
-	resolver := Resolver{LookupEnv: func(string) (string, bool) { return " env-token ", true }, Keyring: store}
+	resolver := testResolver("account", store, func(string) (string, bool) { return " env-token ", true })
 	got, err := resolver.Token()
 	if err != nil || got != "env-token" {
 		t.Fatalf("Token() = %q, %v", got, err)
 	}
 }
 
-func TestTokenFallsBackToKeyring(t *testing.T) {
+func TestTokenFallsBackToAccountScopedKeyring(t *testing.T) {
 	store := &fakeKeyring{value: "keyring-token"}
-	resolver := Resolver{LookupEnv: func(string) (string, bool) { return "", false }, Keyring: store}
+	resolver := testResolver(" account-a ", store, func(string) (string, bool) { return "", false })
 	got, err := resolver.Token()
 	if err != nil || got != "keyring-token" {
 		t.Fatalf("Token() = %q, %v", got, err)
-	}
-}
-
-func TestKeyringCredentialIsAccountSpecific(t *testing.T) {
-	store := &fakeKeyring{value: "token"}
-	resolver := Resolver{LookupEnv: func(string) (string, bool) { return "", false }, Keyring: store, AccountID: "account-a"}
-	if _, err := resolver.Token(); err != nil {
-		t.Fatal(err)
 	}
 	if store.lastUser != KeyringUser+":account-a" {
 		t.Fatalf("keyring user = %q", store.lastUser)
@@ -65,11 +64,24 @@ func TestKeyringCredentialIsAccountSpecific(t *testing.T) {
 }
 
 func TestTokenNotFoundAndStoreValidation(t *testing.T) {
-	resolver := Resolver{LookupEnv: func(string) (string, bool) { return "", false }, Keyring: &fakeKeyring{err: keyring.ErrNotFound}}
+	resolver := testResolver("account", &fakeKeyring{err: keyring.ErrNotFound}, func(string) (string, bool) { return "", false })
 	if _, err := resolver.Token(); !errors.Is(err, ErrTokenNotFound) {
 		t.Fatalf("expected ErrTokenNotFound, got %v", err)
 	}
 	if err := resolver.Store(" "); err == nil {
 		t.Fatal("expected empty token error")
+	}
+}
+
+func TestResolverRequiresAccountID(t *testing.T) {
+	resolver := testResolver(" ", &fakeKeyring{}, func(string) (string, bool) { return "token", true })
+	if _, err := resolver.Token(); err == nil {
+		t.Fatal("Token must reject an empty account ID")
+	}
+	if err := resolver.Store("token"); err == nil {
+		t.Fatal("Store must reject an empty account ID")
+	}
+	if err := resolver.Delete(); err == nil {
+		t.Fatal("Delete must reject an empty account ID")
 	}
 }

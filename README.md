@@ -9,7 +9,7 @@ A focused Go CLI and terminal UI for safely managing one Cloudflare Bulk Redirec
 - Updates are explicit DELETE-then-POST operations, with Cloudflare bulk-operation polling between dependent phases.
 - The replace-all `PUT /items` endpoint is never used.
 - Existing comments and redirect options, including explicit `false` boolean values, are preserved on edits.
-- The TUI requires `y` to apply a plan. Quitting is disabled while a remote operation is active because Cloudflare operations cannot safely be assumed cancelled.
+- The TUI requires `y` to apply a plan. Pressing `q` or `Esc` during apply stops waiting locally; an operation already submitted to Cloudflare may still finish, so reopen or run `list` to verify.
 
 ## Install
 

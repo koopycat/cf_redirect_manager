@@ -50,29 +50,6 @@ func TestListItemsUsesCursorPaginationAtMaximumPageSize(t *testing.T) {
 	}
 }
 
-func TestSearchItemsSendsSearchOnEveryCursorPage(t *testing.T) {
-	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		call := calls.Add(1)
-		if got := r.URL.Query().Get("search"); got != "needle value" {
-			t.Errorf("search = %q", got)
-		}
-		after := ""
-		if call == 1 {
-			after = "next"
-		}
-		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []any{}, "result_info": map[string]any{"cursors": map[string]any{"after": after}}})
-	}))
-	defer server.Close()
-	client := Client{HTTPClient: server.Client(), BaseURL: server.URL}
-	if _, err := client.SearchItems(context.Background(), "account", "list", "needle value"); err != nil {
-		t.Fatal(err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("calls = %d", calls.Load())
-	}
-}
-
 func TestListItemsRejectsRepeatedCursor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []any{}, "result_info": map[string]any{"cursors": map[string]any{"after": "repeat"}}})
@@ -140,12 +117,20 @@ func TestDoRetriesOnRateLimitAndSucceeds(t *testing.T) {
 	}))
 	defer server.Close()
 	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
-	var result envelope[[]json.RawMessage]
-	if err := client.do(context.Background(), http.MethodGet, "/x", nil, &result); err != nil {
-		t.Fatalf("do after rate limit retry: %v", err)
+	if _, err := doJSON[[]json.RawMessage](context.Background(), &client, http.MethodGet, "/x", nil); err != nil {
+		t.Fatalf("GET after rate limit retry: %v", err)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("expected one retry, got %d calls", calls.Load())
+	}
+}
+
+func TestRetryAfterIsHonoredWithoutJitter(t *testing.T) {
+	if got := backoffFor(http.Header{"Retry-After": []string{"0"}}, 0); got != 0 {
+		t.Fatalf("backoffFor Retry-After 0 = %s", got)
+	}
+	if got := backoffFor(http.Header{"Retry-After": []string{"9999"}}, 0); got != maxBackoff {
+		t.Fatalf("backoffFor capped Retry-After = %s, want %s", got, maxBackoff)
 	}
 }
 
@@ -158,8 +143,7 @@ func TestDoDoesNotRetryAuthFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
-	var result envelope[[]json.RawMessage]
-	err := client.do(context.Background(), http.MethodGet, "/x", nil, &result)
+	_, err := doJSON[[]json.RawMessage](context.Background(), &client, http.MethodGet, "/x", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -180,12 +164,60 @@ func TestDoRetriesOtherTransientStatuses(t *testing.T) {
 	}))
 	defer server.Close()
 	client := Client{HTTPClient: server.Client(), BaseURL: server.URL, Token: "secret"}
-	var result envelope[[]json.RawMessage]
-	if err := client.do(context.Background(), http.MethodGet, "/x", nil, &result); err != nil {
-		t.Fatalf("do after 500 retries: %v", err)
+	if _, err := doJSON[[]json.RawMessage](context.Background(), &client, http.MethodGet, "/x", nil); err != nil {
+		t.Fatalf("GET after 500 retries: %v", err)
 	}
 	if calls.Load() != 3 {
 		t.Fatalf("expected two retries, got %d calls", calls.Load())
+	}
+}
+
+func TestMutationsNeverRetryTransientResponses(t *testing.T) {
+	var postCalls, deleteCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var calls *atomic.Int32
+		switch r.Method {
+		case http.MethodPost:
+			calls = &postCalls
+		case http.MethodDelete:
+			calls = &deleteCalls
+		default:
+			t.Fatalf("unexpected method %s", r.Method)
+		}
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "errors": []any{map[string]any{"message": "try later"}}})
+	}))
+	defer server.Close()
+	client := Client{HTTPClient: server.Client(), BaseURL: server.URL}
+	redirect := domain.New("https://a.example", "https://b.example")
+	if _, err := client.CreateItems(context.Background(), "account", "list", []domain.Redirect{redirect}); err == nil {
+		t.Fatal("CreateItems must return the transient error")
+	}
+	if _, err := client.DeleteItems(context.Background(), "account", "list", []string{"item"}); err == nil {
+		t.Fatal("DeleteItems must return the transient error")
+	}
+	if postCalls.Load() != 1 || deleteCalls.Load() != 1 {
+		t.Fatalf("mutations were replayed: POST %d, DELETE %d", postCalls.Load(), deleteCalls.Load())
+	}
+}
+
+func TestListItemsSanitizesRemoteFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []any{
+			map[string]any{"id": "one", "comment": "comment\x1b[2J\ntext", "redirect": map[string]any{
+				"source_url": "source\x1b[31m", "target_url": "target\x07", "status_code": 301,
+			}},
+		}, "result_info": map[string]any{"cursors": map[string]any{}}})
+	}))
+	defer server.Close()
+	client := Client{HTTPClient: server.Client(), BaseURL: server.URL}
+	items, err := client.ListItems(context.Background(), "account", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := items[0]; got.Source != "source[31m" || got.Target != "target" || got.Comment != "comment[2Jtext" {
+		t.Fatalf("remote fields were not sanitized: %#v", got)
 	}
 }
 

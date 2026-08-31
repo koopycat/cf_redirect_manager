@@ -18,51 +18,53 @@ const (
 
 var ErrTokenNotFound = errors.New("Cloudflare API token not found")
 
-// Keyring is the narrow credential-store abstraction used by Resolver.
-type Keyring interface {
+// keyringStore is the narrow seam used to substitute a credential store in
+// tests without exposing keyring configuration in the production API.
+type keyringStore interface {
 	Get(service, user string) (string, error)
 	Set(service, user, password string) error
 	Delete(service, user string) error
 }
 
-type OSKeyring struct{}
+type osKeyring struct{}
 
-func (OSKeyring) Get(service, user string) (string, error) { return keyring.Get(service, user) }
-func (OSKeyring) Set(service, user, password string) error {
+func (osKeyring) Get(service, user string) (string, error) { return keyring.Get(service, user) }
+func (osKeyring) Set(service, user, password string) error {
 	return keyring.Set(service, user, password)
 }
-func (OSKeyring) Delete(service, user string) error { return keyring.Delete(service, user) }
+func (osKeyring) Delete(service, user string) error { return keyring.Delete(service, user) }
 
 type Resolver struct {
-	LookupEnv func(string) (string, bool)
-	Keyring   Keyring
-	Service   string
-	User      string
-	AccountID string
+	accountID string
+	keyring   keyringStore
+	lookupEnv func(string) (string, bool)
 }
 
-func NewResolver(accountID ...string) Resolver {
-	r := Resolver{LookupEnv: os.LookupEnv, Keyring: OSKeyring{}, Service: KeyringService, User: KeyringUser}
-	if len(accountID) > 0 {
-		r.AccountID = strings.TrimSpace(accountID[0])
+func NewResolver(accountID string) Resolver {
+	return Resolver{
+		accountID: strings.TrimSpace(accountID),
+		keyring:   osKeyring{},
+		lookupEnv: os.LookupEnv,
 	}
-	return r
 }
 
 // Token gives the environment token precedence, then consults the OS keychain.
 func (r Resolver) Token() (string, error) {
-	lookup := r.LookupEnv
+	if r.accountID == "" {
+		return "", fmt.Errorf("Cloudflare account ID is required")
+	}
+	lookup := r.lookupEnv
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
 	if value, ok := lookup(TokenEnv); ok && strings.TrimSpace(value) != "" {
 		return strings.TrimSpace(value), nil
 	}
-	if r.Keyring == nil {
-		return "", ErrTokenNotFound
+	store := r.keyring
+	if store == nil {
+		store = osKeyring{}
 	}
-	service, user := r.names()
-	value, err := r.Keyring.Get(service, user)
+	value, err := store.Get(KeyringService, r.keyringUser())
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return "", ErrTokenNotFound
@@ -76,40 +78,37 @@ func (r Resolver) Token() (string, error) {
 }
 
 func (r Resolver) Store(token string) error {
-	if strings.TrimSpace(token) == "" {
+	if r.accountID == "" {
+		return fmt.Errorf("Cloudflare account ID is required")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return fmt.Errorf("API token must not be empty")
 	}
-	if r.Keyring == nil {
-		return fmt.Errorf("keychain is not configured")
+	store := r.keyring
+	if store == nil {
+		store = osKeyring{}
 	}
-	service, user := r.names()
-	if err := r.Keyring.Set(service, user, strings.TrimSpace(token)); err != nil {
+	if err := store.Set(KeyringService, r.keyringUser(), token); err != nil {
 		return fmt.Errorf("store API token in keychain: %w", err)
 	}
 	return nil
 }
 
 func (r Resolver) Delete() error {
-	if r.Keyring == nil {
-		return fmt.Errorf("keychain is not configured")
+	if r.accountID == "" {
+		return fmt.Errorf("Cloudflare account ID is required")
 	}
-	service, user := r.names()
-	if err := r.Keyring.Delete(service, user); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+	store := r.keyring
+	if store == nil {
+		store = osKeyring{}
+	}
+	if err := store.Delete(KeyringService, r.keyringUser()); err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return fmt.Errorf("delete API token from keychain: %w", err)
 	}
 	return nil
 }
 
-func (r Resolver) names() (string, string) {
-	service, user := r.Service, r.User
-	if service == "" {
-		service = KeyringService
-	}
-	if user == "" {
-		user = KeyringUser
-	}
-	if accountID := strings.TrimSpace(r.AccountID); accountID != "" {
-		user += ":" + accountID
-	}
-	return service, user
+func (r Resolver) keyringUser() string {
+	return KeyringUser + ":" + r.accountID
 }

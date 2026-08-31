@@ -4,19 +4,17 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strings"
-	"unicode"
 
+	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/koopycat/cf-redirect/internal/app"
 	"github.com/koopycat/cf-redirect/internal/auth"
@@ -25,6 +23,7 @@ import (
 	"github.com/koopycat/cf-redirect/internal/csvio"
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
+	"github.com/koopycat/cf-redirect/internal/textsafe"
 	"github.com/koopycat/cf-redirect/internal/tui"
 )
 
@@ -269,7 +268,7 @@ func isTerminal(cmd *cobra.Command) bool {
 	in, out := cmd.InOrStdin(), cmd.OutOrStdout()
 	i, iok := in.(*os.File)
 	o, ook := out.(*os.File)
-	return iok && ook && term.IsTerminal(int(i.Fd())) && term.IsTerminal(int(o.Fd()))
+	return iok && ook && term.IsTerminal(i.Fd()) && term.IsTerminal(o.Fd())
 }
 
 // readPasswordInteractive prompts on stderr and reads a hidden value from the
@@ -277,14 +276,14 @@ func isTerminal(cmd *cobra.Command) bool {
 // piping stdout does not silently swallow the prompt.
 func readPasswordInteractive(cmd *cobra.Command, prompt string) (string, error) {
 	in, ok := cmd.InOrStdin().(*os.File)
-	if !ok || !term.IsTerminal(int(in.Fd())) {
+	if !ok || !term.IsTerminal(in.Fd()) {
 		return "", fmt.Errorf("login requires a running terminal; pipe the token with --token-stdin")
 	}
 	if _, err := fmt.Fprint(cmd.ErrOrStderr(), prompt); err != nil {
 		return "", err
 	}
 	defer fmt.Fprintln(cmd.ErrOrStderr())
-	value, err := term.ReadPassword(int(in.Fd()))
+	value, err := term.ReadPassword(in.Fd())
 	if err != nil {
 		return "", err
 	}
@@ -300,11 +299,11 @@ func renderPlan(w io.Writer, plan planner.Plan) error {
 	for _, c := range plan.Changes {
 		switch c.Kind {
 		case planner.Add:
-			fmt.Fprintf(&b, "+ %s -> %s\n", c.After.Source, c.After.Target)
+			fmt.Fprintf(&b, "+ %s -> %s\n", textsafe.StripControls(c.After.Source), textsafe.StripControls(c.After.Target))
 		case planner.Update:
-			fmt.Fprintf(&b, "~ %s -> %s => %s -> %s\n", c.Before.Source, c.Before.Target, c.After.Source, c.After.Target)
+			fmt.Fprintf(&b, "~ %s -> %s => %s -> %s\n", textsafe.StripControls(c.Before.Source), textsafe.StripControls(c.Before.Target), textsafe.StripControls(c.After.Source), textsafe.StripControls(c.After.Target))
 		case planner.Delete:
-			fmt.Fprintf(&b, "- %s\n", c.Before.Source)
+			fmt.Fprintf(&b, "- %s\n", textsafe.StripControls(c.Before.Source))
 		}
 	}
 	if _, err := io.WriteString(w, b.String()); err != nil {
@@ -313,21 +312,14 @@ func renderPlan(w io.Writer, plan planner.Plan) error {
 	return nil
 }
 
-func safeTerminalText(value string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, value)
-}
-
 func renderRedirects(w io.Writer, items []domain.Redirect, format string) error {
 	items = append([]domain.Redirect(nil), items...)
 	for i := range items {
-		items[i].Comment = safeTerminalText(items[i].Comment)
+		items[i].Source = textsafe.StripControls(items[i].Source)
+		items[i].Target = textsafe.StripControls(items[i].Target)
+		items[i].Comment = textsafe.StripControls(items[i].Comment)
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Source < items[j].Source })
+	slices.SortFunc(items, func(a, b domain.Redirect) int { return strings.Compare(a.Source, b.Source) })
 	switch format {
 	case "json":
 		return json.NewEncoder(w).Encode(items)
@@ -464,6 +456,3 @@ func runTUI(cmd *cobra.Command, o *options) error {
 	}
 	return tui.Run(api, cfg.AccountID, cfg.ListID)
 }
-
-// keep context imported in older Cobra integrations where callers set it.
-var _ = context.Background
