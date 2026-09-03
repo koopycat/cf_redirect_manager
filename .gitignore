@@ -3,3 +3,9 @@
 .DS_Store
 .env
 /cf-redirect
+
+# devenv / direnv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+.direnv/

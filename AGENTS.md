@@ -4,6 +4,10 @@
 
 `cf-redirect` is a Go CLI and Charm TUI for safely managing one configured Cloudflare Bulk Redirect List.
 
+## Development environment
+
+Enter commands through `devenv shell -- ...`; direnv activates the same shell automatically after `direnv allow`.
+
 ## Commands
 
 - `just fmt` — format Go sources
@@ -12,7 +16,7 @@
 - `just check` — format check, tests, and vet
 - `just build` — build `./bin/cf-redirect`
 
-Use `go` through the project commands. Do not add a Cloudflare SDK for the focused API surface.
+Use `go` through the project commands inside the devenv shell. Do not add a Cloudflare SDK for the focused API surface.
 
 ## Invariants
 

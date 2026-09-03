@@ -88,6 +88,16 @@ Import performs source-keyed upserts. It does not delete current redirects absen
 
 ## Development
 
+The reproducible development shell provides Go 1.25 and `just`:
+
+```sh
+direnv allow                 # automatically enter the shell in this checkout
+# or without direnv:
+devenv shell -- just check
+```
+
+Inside the shell:
+
 ```sh
 just check     # formatting check, tests, vet
 just race      # race detector
