@@ -80,3 +80,71 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+
+  update-homebrew:
+    name: Update Homebrew cask
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Homebrew tap token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.HOMEBREW_APP_ID }}
+          private-key: ${{ secrets.HOMEBREW_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: homebrew-tap
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cf-redirect-*
+          path: dist
+          merge-multiple: true
+      - name: Check out Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ steps.app-token.outputs.token }}
+          path: homebrew-tap
+      - name: Update cask
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          arm_sha="$(sha256sum "dist/cf-redirect_${version}_darwin_arm64.tar.gz" | cut -d ' ' -f1)"
+          intel_sha="$(sha256sum "dist/cf-redirect_${version}_darwin_amd64.tar.gz" | cut -d ' ' -f1)"
+          python3 - "$version" "$arm_sha" "$intel_sha" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version, arm_sha, intel_sha = sys.argv[1:]
+          path = Path("homebrew-tap/Casks/cf-redirect.rb")
+          cask = path.read_text()
+          cask, version_changes = re.subn(
+              r'^  version "[^"]+"$', f'  version "{version}"', cask, count=1, flags=re.MULTILINE
+          )
+          cask, checksum_changes = re.subn(
+              r'^  sha256 arm:   "[0-9a-f]{64}",\n         intel: "[0-9a-f]{64}"$',
+              f'  sha256 arm:   "{arm_sha}",\n         intel: "{intel_sha}"',
+              cask,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          if version_changes != 1 or checksum_changes != 1:
+              raise SystemExit("could not find the expected version and checksum stanzas")
+          path.write_text(cask)
+          PY
+          ruby -c homebrew-tap/Casks/cf-redirect.rb
+      - name: Commit and push cask
+        working-directory: homebrew-tap
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
+          git add Casks/cf-redirect.rb
+          git diff --cached --check
+          git commit -m "Update cf-redirect to ${version}"
+          git push origin HEAD:main
