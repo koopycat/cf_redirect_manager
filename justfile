@@ -12,6 +12,12 @@ test:
 race:
     go test -race ./...
 
+integration-mock:
+    go test -count=1 -v -run '^TestRedirectLifecycleAgainstMockCloudflare$' ./integration
+
+integration-live:
+    CF_REDIRECT_INTEGRATION=1 go test -count=1 -timeout 12m -v -run '^TestRedirectLifecycleAgainstLiveCloudflare$' ./integration
+
 vet:
     go vet ./...
 

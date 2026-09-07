@@ -99,7 +99,26 @@ devenv shell -- just check
 Inside the shell:
 
 ```sh
-just check     # formatting check, tests, vet
-just race      # race detector
+just check              # formatting check, tests, vet
+just race               # race detector
+just integration-mock   # full lifecycle against an in-process HTTP API
 just build
 ```
+
+### Integration tests
+
+`just integration-mock` runs a deterministic redirect lifecycle through the real planner, executor, asynchronous-operation polling, and HTTP client. It uses Go's in-process `httptest.Server`, so normal tests and CI need no credentials, network access, container runtime, or separate MockServer process.
+
+A second test runs the same lifecycle against Cloudflare. It creates a redirect with every option enabled, reads it back, replaces its target while verifying that options and its comment survive, and deletes it. The test is deliberately opt-in and uses the same account and list resolution as the CLI: `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_LIST_ID` override the persisted configuration.
+
+The live test snapshots all pre-existing redirects, mutates only a cryptographically unique test source, verifies the pre-existing entries after each phase, and performs source-scoped cleanup on failure. A dedicated disposable list is still preferable, but the test can temporarily run against the currently configured list without requiring it to be empty.
+
+Give the token read and edit permission for the configured list. Supply it through `CLOUDFLARE_API_TOKEN`, or store it in the account-specific OS keychain with `cf-redirect auth login`, then run:
+
+```sh
+just integration-live
+```
+
+`just integration-live` sets `CF_REDIRECT_INTEGRATION=1` only for that invocation. Both integration-test recipes run Go in verbose mode and print each lifecycle phase, executor operation, verification, and safety-cleanup step while it happens. If Cloudflare remains unavailable beyond the operation timeout, inspect the configured list and remove any source beginning with `cf-redirect-` before retrying.
+
+An external service such as MockServer or WireMock would be useful if several languages needed to share a standalone Cloudflare simulation or if recorded HTTP fixtures were required. For this Go-only client, `httptest.Server` is the smaller and safer default: the mock starts with the test, binds an ephemeral local port, runs in CI without Docker or Java, and still validates authentication, paths, methods, request bodies, response envelopes, and mutation ordering. The opt-in live test covers drift between that contract and Cloudflare's real API.
