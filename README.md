@@ -29,9 +29,9 @@ go install github.com/koopycat/cf-redirect/cmd/cf-redirect@latest
 just build
 ```
 
-Maintainers publish a release by pushing a semantic-version tag such as `v1.2.3`. The release workflow tests the repository, builds all supported platform archives, generates checksums, publishes the tag's GitHub release with generated notes, and updates the version and macOS checksums in `koopycat/homebrew-tap`.
+Maintainers publish a release by pushing a stable semantic-version tag such as `v1.2.3` on a commit reachable from `main`. The release workflow tests the repository, builds all supported platform archives, generates checksums, publishes the tag's GitHub release with generated notes, and updates the version and macOS checksums in `koopycat/homebrew-tap`.
 
-Homebrew publishing uses a GitHub App. Configure the `HOMEBREW_APP_ID` Actions repository variable and the `HOMEBREW_APP_PRIVATE_KEY` Actions secret before publishing a tag. The app must be installed on `homebrew-tap` with read and write access to repository contents.
+Homebrew publishing uses a dedicated GitHub App installed only on `homebrew-tap`. Configure the `HOMEBREW_APP_ID` Actions repository variable and the `HOMEBREW_APP_PRIVATE_KEY` Actions secret before publishing a tag. Give the app read and write access to repository contents and no other optional repository or organization permissions. Protect `v*` tags so only release maintainers can create, update, or delete them; protect both repositories' `main` branches from force pushes and deletion. The workflow pins every action to a reviewed commit and restricts the generated installation token to contents access on `homebrew-tap`.
 
 ## Configuration
 
