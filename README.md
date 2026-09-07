@@ -13,6 +13,12 @@ A focused Go CLI and terminal UI for safely managing one Cloudflare Bulk Redirec
 
 ## Install
 
+Install on macOS with Homebrew:
+
+```sh
+brew install --cask koopycat/tap/cf-redirect
+```
+
 Prebuilt archives for Linux and macOS (`amd64` and `arm64`) are available on the [GitHub Releases](https://github.com/koopycat/cf_redirect_manager/releases) page. Each release includes a `SHA256SUMS` file.
 
 To install from source, Go 1.25 or newer is required:
