@@ -85,16 +85,24 @@ CLOUDFLARE_TOKEN_CREATOR_TOKEN="bootstrap-secret" \
 CLOUDFLARE_API_BASE_URL="$api_base" \
 CF_REDIRECT_BIN="$tmp/cf-redirect" \
 FAKE_ARGS="$tmp/args" FAKE_STDIN="$tmp/stdin" \
-  "$root/scripts/create-cloudflare-token" --account-id "$account_id" --list-id "$list_id" --name "test token" >"$tmp/stdout"
+  "$root/scripts/create-cloudflare-token" --account-id "$account_id" --name "test token" >"$tmp/stdout"
 
 [[ "$(cat "$tmp/stdin")" == "generated-secret" ]]
-[[ "$(cat "$tmp/args")" == "--account-id $account_id --list-id $list_id auth login --token-stdin" ]]
+[[ "$(cat "$tmp/args")" == "--account-id $account_id auth login --token-stdin" ]]
 if grep -q 'generated-secret\|bootstrap-secret' "$tmp/stdout"; then
   echo "secret leaked to stdout" >&2
   exit 1
 fi
+
+CLOUDFLARE_TOKEN_CREATOR_TOKEN="bootstrap-secret" \
+CLOUDFLARE_API_BASE_URL="$api_base" \
+CF_REDIRECT_BIN="$tmp/cf-redirect" \
+FAKE_ARGS="$tmp/args" FAKE_STDIN="$tmp/stdin" \
+  "$root/scripts/create-cloudflare-token" --account-id "$account_id" --verify-list-id "$list_id" --name "test token 2" >"$tmp/stdout"
+[[ "$(cat "$tmp/args")" == "--account-id $account_id --list-id $list_id auth login --token-stdin" ]]
+
 jq -se --arg account "$account_id" '
-  length == 2 and
+  length == 4 and
   .[0].method == "GET" and
   .[0].authorization == "Bearer bootstrap-secret" and
   .[1].method == "POST" and
@@ -103,7 +111,10 @@ jq -se --arg account "$account_id" '
     effect: "allow",
     resources: {("com.cloudflare.api.account." + $account): "*"},
     permission_groups: [{id: "permission-id"}]
-  }]
+  }] and
+  .[2].method == "GET" and
+  .[3].method == "POST" and
+  .[3].body.name == "test token 2"
 ' "$tmp/requests" >/dev/null
 
 : >"$tmp/requests"
@@ -111,7 +122,7 @@ if CLOUDFLARE_TOKEN_CREATOR_TOKEN="bootstrap-secret" \
   CLOUDFLARE_API_BASE_URL="$api_base" \
   CF_REDIRECT_BIN="$tmp/cf-redirect" FAKE_FAIL=true \
   FAKE_ARGS="$tmp/args" FAKE_STDIN="$tmp/stdin" \
-  "$root/scripts/create-cloudflare-token" --account-id "$account_id" --list-id "$list_id" >"$tmp/failure-out" 2>"$tmp/failure-err"; then
+  "$root/scripts/create-cloudflare-token" --account-id "$account_id" --verify-list-id "$list_id" >"$tmp/failure-out" 2>"$tmp/failure-err"; then
   echo "expected verification failure" >&2
   exit 1
 fi

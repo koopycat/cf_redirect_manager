@@ -73,11 +73,10 @@ To create a least-privilege account-owned token automatically, run the helper fr
 
 ```sh
 scripts/create-cloudflare-token \
-  --account-id YOUR_ACCOUNT_ID \
-  --list-id YOUR_LIST_ID
+  --account-id YOUR_ACCOUNT_ID
 ```
 
-The helper requires a bootstrap token with `Account API Tokens: Edit` for the selected account. Enter it at the hidden prompt or provide it through `CLOUDFLARE_TOKEN_CREATOR_TOKEN`. It resolves Cloudflare's current permission-group ID, creates a token restricted to `Account Filter Lists: Edit` on that account, verifies access to the configured list, and stores the generated token in the OS keychain without printing it. If verification or storage fails, it revokes the generated token.
+The helper requires a bootstrap token with `Account API Tokens: Edit` for the selected account. Enter it at the hidden prompt or provide it through `CLOUDFLARE_TOKEN_CREATOR_TOKEN`. It resolves Cloudflare's current permission-group ID, creates a token restricted to `Account Filter Lists: Edit` on that account, verifies access to the list already configured for `cf-redirect`, and stores the generated token in the OS keychain without printing it. Use `--verify-list-id LIST_ID` to override the configured list for verification. Cloudflare cannot restrict this permission to one list; the token can edit all filter and Bulk Redirect Lists in the account. If verification or storage fails, the helper revokes the generated token.
 
 ## Usage
 

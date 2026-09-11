@@ -6,18 +6,19 @@ usage() {
 Create and store a least-privilege Cloudflare token for cf-redirect.
 
 Usage:
-  create-cloudflare-token --account-id ACCOUNT_ID --list-id LIST_ID [--name NAME]
+  create-cloudflare-token --account-id ACCOUNT_ID [--verify-list-id LIST_ID] [--name NAME]
 
 The bootstrap credential must have Account API Tokens: Edit for the selected
 account. Set CLOUDFLARE_TOKEN_CREATOR_TOKEN or enter it at the hidden prompt.
-The generated token receives only Account Filter Lists: Edit on that account.
-It is verified against the configured list and stored in the OS keychain by
-cf-redirect; it is never printed.
+The generated token receives Account Filter Lists: Edit for the whole account;
+Cloudflare cannot scope it to one list. Before storing it in the OS keychain,
+cf-redirect verifies it against --verify-list-id, or the configured list when
+that option is omitted. Neither credential is printed.
 EOF
 }
 
 account_id=""
-list_id=""
+verify_list_id=""
 token_name="cf-redirect-$(date -u +%Y%m%dT%H%M%SZ)"
 
 while (($#)); do
@@ -27,9 +28,9 @@ while (($#)); do
       account_id="$2"
       shift 2
       ;;
-    --list-id)
-      [[ $# -ge 2 ]] || { echo "--list-id requires a value" >&2; exit 2; }
-      list_id="$2"
+    --verify-list-id)
+      [[ $# -ge 2 ]] || { echo "--verify-list-id requires a value" >&2; exit 2; }
+      verify_list_id="$2"
       shift 2
       ;;
     --name)
@@ -50,7 +51,10 @@ while (($#)); do
 done
 
 [[ "$account_id" =~ ^[[:xdigit:]]{32}$ ]] || { echo "--account-id must be a 32-character hexadecimal ID" >&2; exit 2; }
-[[ "$list_id" =~ ^[[:xdigit:]]{32}$ ]] || { echo "--list-id must be a 32-character hexadecimal ID" >&2; exit 2; }
+if [[ -n "$verify_list_id" && ! "$verify_list_id" =~ ^[[:xdigit:]]{32}$ ]]; then
+  echo "--verify-list-id must be a 32-character hexadecimal ID" >&2
+  exit 2
+fi
 [[ -n "$token_name" && ${#token_name} -le 120 ]] || { echo "--name must contain 1 to 120 characters" >&2; exit 2; }
 
 for command_name in curl jq; do
@@ -142,8 +146,13 @@ created_token_id="$(jq -r '.result.id // empty' "$response_file")"
 created_token="$(jq -r '.result.value // empty' "$response_file")"
 [[ -n "$created_token_id" && -n "$created_token" ]] || { echo "Cloudflare created no usable token" >&2; exit 1; }
 
+login_args=(--account-id "$account_id")
+if [[ -n "$verify_list_id" ]]; then
+  login_args+=(--list-id "$verify_list_id")
+fi
+login_args+=(auth login --token-stdin)
 if ! printf '%s' "$created_token" | env -u CLOUDFLARE_API_TOKEN \
-  "$cf_redirect" --account-id "$account_id" --list-id "$list_id" auth login --token-stdin; then
+  "$cf_redirect" "${login_args[@]}"; then
   echo "Generated token verification or keychain storage failed; the token was revoked" >&2
   exit 1
 fi
