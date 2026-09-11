@@ -134,3 +134,7 @@ just integration-live
 `just integration-live` sets `CF_REDIRECT_INTEGRATION=1` only for that invocation. Both integration-test recipes run Go in verbose mode and print each lifecycle phase, executor operation, verification, and safety-cleanup step while it happens. If Cloudflare remains unavailable beyond the operation timeout, inspect the configured list and remove any source beginning with `cf-redirect-` before retrying.
 
 An external service such as MockServer or WireMock would be useful if several languages needed to share a standalone Cloudflare simulation or if recorded HTTP fixtures were required. For this Go-only client, `httptest.Server` is the smaller and safer default: the mock starts with the test, binds an ephemeral local port, runs in CI without Docker or Java, and still validates authentication, paths, methods, request bodies, response envelopes, and mutation ordering. The opt-in live test covers drift between that contract and Cloudflare's real API.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
