@@ -18,19 +18,46 @@ func TestRenderPlanIncludesDeterministicMarkersAndCounts(t *testing.T) {
 	updated := old
 	updated.Target = "https://after.example"
 	added := domain.New("https://add.example", "https://target.example")
-	plan := planner.Plan{Changes: []planner.Change{
-		{Kind: planner.Add, After: &added},
-		{Kind: planner.Update, Before: &old, After: &updated},
-		{Kind: planner.Delete, Before: &old},
-	}}
+	plan := planner.Plan{
+		Changes: []planner.Change{
+			{Kind: planner.Add, After: &added},
+			{Kind: planner.Update, Before: &old, After: &updated},
+			{Kind: planner.Delete, Before: &old},
+		},
+		SkippedExisting: 2,
+	}
 	var output bytes.Buffer
 	if err := renderPlan(&output, plan); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Plan: 1 add, 1 update, 1 delete", "+ https://add.example", "~ https://old.example -> https://before.example => https://old.example -> https://after.example", "- https://old.example"} {
+	for _, want := range []string{"Plan: 1 add, 1 update, 1 delete, 2 skipped existing", "+ https://add.example", "~ https://old.example -> https://before.example => https://old.example -> https://after.example", "- https://old.example"} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("plan output %q does not contain %q", output.String(), want)
 		}
+	}
+}
+
+func TestRenderPlanShowsAllSkippedImport(t *testing.T) {
+	plan := planner.Plan{SkippedExisting: 3}
+	if !plan.Empty() {
+		t.Fatal("reporting skipped rows must not make a plan actionable")
+	}
+	var output bytes.Buffer
+	if err := renderPlan(&output, plan); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "Plan: 0 add, 0 update, 0 delete, 3 skipped existing\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRenderPlanOmitsSkippedCountWhenZero(t *testing.T) {
+	var output bytes.Buffer
+	if err := renderPlan(&output, planner.Plan{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := output.String(), "Plan: 0 add, 0 update, 0 delete\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 

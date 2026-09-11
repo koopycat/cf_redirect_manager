@@ -109,7 +109,7 @@ source,target
 example.com/old/,https://www.example.com/new/
 ```
 
-Import performs source-keyed upserts. It does not delete current redirects absent from the file.
+Import performs source-keyed upserts. Its plan reports CSV rows whose source and target already exist unchanged as `skipped existing`. It does not delete current redirects absent from the file, and omitted redirects are not included in the skipped count.
 
 ## Development
 

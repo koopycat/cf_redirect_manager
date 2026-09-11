@@ -74,17 +74,19 @@ func TestDeleteAllRejectsCurrentItemsWithoutIDs(t *testing.T) {
 func TestImportUpsertPreservesExistingAndNeverDeletesOmitted(t *testing.T) {
 	old := existing()
 	omitted := domain.Redirect{ID: "id-2", Source: "https://omitted.example", Target: "https://keep.example", StatusCode: 302, Comment: "untouched"}
+	unchanged := domain.Redirect{ID: "id-3", Source: "https://unchanged.example", Target: "https://target.example/unchanged", StatusCode: 302, PreserveQueryString: true, Comment: "retain unchanged"}
 	imported := []domain.Redirect{
 		domain.New(old.Source, "https://target.example/changed"),
 		domain.New("https://added.example", "https://target.example/added"),
+		domain.New(unchanged.Source, unchanged.Target),
 	}
-	plan, err := ImportUpsert([]domain.Redirect{old, omitted}, imported)
+	plan, err := ImportUpsert([]domain.Redirect{old, omitted, unchanged}, imported)
 	if err != nil {
 		t.Fatal(err)
 	}
 	adds, updates, deletes := plan.Counts()
-	if adds != 1 || updates != 1 || deletes != 0 {
-		t.Fatalf("counts = %d,%d,%d", adds, updates, deletes)
+	if adds != 1 || updates != 1 || deletes != 0 || plan.SkippedExisting != 1 {
+		t.Fatalf("counts = %d,%d,%d, skipped=%d", adds, updates, deletes, plan.SkippedExisting)
 	}
 	for _, change := range plan.Changes {
 		if change.Kind == Update {
@@ -95,6 +97,17 @@ func TestImportUpsertPreservesExistingAndNeverDeletesOmitted(t *testing.T) {
 		if change.Before != nil && change.Before.ID == omitted.ID {
 			t.Fatal("omitted item was included in plan")
 		}
+	}
+}
+
+func TestImportAllExistingRowsReportsSkippedWithoutMutations(t *testing.T) {
+	old := existing()
+	plan, err := ImportUpsert([]domain.Redirect{old}, []domain.Redirect{domain.New(old.Source, old.Target)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() || plan.SkippedExisting != 1 {
+		t.Fatalf("plan = %#v", plan)
 	}
 }
 

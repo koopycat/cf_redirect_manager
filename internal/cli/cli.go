@@ -309,7 +309,11 @@ func renderPlan(w io.Writer, plan planner.Plan) error {
 	// proceed without its required plan preview.
 	var b strings.Builder
 	adds, updates, deletes := plan.Counts()
-	fmt.Fprintf(&b, "Plan: %d add, %d update, %d delete\n", adds, updates, deletes)
+	fmt.Fprintf(&b, "Plan: %d add, %d update, %d delete", adds, updates, deletes)
+	if plan.SkippedExisting > 0 {
+		fmt.Fprintf(&b, ", %d skipped existing", plan.SkippedExisting)
+	}
+	b.WriteByte('\n')
 	for _, c := range plan.Changes {
 		switch c.Kind {
 		case planner.Add:

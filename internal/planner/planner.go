@@ -26,9 +26,12 @@ type Change struct {
 }
 
 type Plan struct {
-	Changes []Change
+	Changes         []Change
+	SkippedExisting int
 }
 
+// Empty reports whether the plan has no mutations to apply. Reporting-only
+// metadata such as SkippedExisting does not make a plan actionable.
 func (p Plan) Empty() bool { return len(p.Changes) == 0 }
 
 func (p Plan) Counts() (adds, updates, deletes int) {
@@ -117,7 +120,7 @@ func ImportUpsert(current []domain.Redirect, imported []domain.Redirect) (Plan, 
 		return Plan{}, err
 	}
 	seen := make(map[string]struct{}, len(imported))
-	changes := make([]Change, 0, len(imported))
+	plan := Plan{Changes: make([]Change, 0, len(imported))}
 	for _, candidate := range imported {
 		if err := candidate.Validate(); err != nil {
 			return Plan{}, fmt.Errorf("import source %q: %w", candidate.Source, err)
@@ -129,19 +132,21 @@ func ImportUpsert(current []domain.Redirect, imported []domain.Redirect) (Plan, 
 		old := findBySource(current, candidate.Source)
 		if old == nil {
 			candidate.ID = ""
-			changes = append(changes, Change{Kind: Add, After: pointer(candidate)})
+			plan.Changes = append(plan.Changes, Change{Kind: Add, After: pointer(candidate)})
 			continue
 		}
 		replacement := *old
 		replacement.Target = candidate.Target
-		if !old.EqualContent(replacement) {
-			changes = append(changes, Change{Kind: Update, Before: pointer(*old), After: pointer(replacement)})
+		if old.EqualContent(replacement) {
+			plan.SkippedExisting++
+			continue
 		}
+		plan.Changes = append(plan.Changes, Change{Kind: Update, Before: pointer(*old), After: pointer(replacement)})
 	}
-	sort.SliceStable(changes, func(i, j int) bool {
-		return changes[i].After.Source < changes[j].After.Source
+	sort.SliceStable(plan.Changes, func(i, j int) bool {
+		return plan.Changes[i].After.Source < plan.Changes[j].After.Source
 	})
-	return Plan{Changes: changes}, nil
+	return plan, nil
 }
 
 func validateCurrent(current []domain.Redirect) error {
