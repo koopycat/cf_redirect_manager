@@ -69,14 +69,14 @@ printf '%s' "$TOKEN" | cf-redirect auth login --token-stdin
 
 The token needs Account-level `Account Filter Lists: Edit` permission for the configured account. `Read` is insufficient because add, edit, import, and delete mutate list items.
 
-To create a least-privilege account-owned token automatically, run the helper from a checkout:
+To create and store a least-privilege token through Cloudflare's browser form, run the helper from a checkout:
 
 ```sh
 scripts/create-cloudflare-token \
   --account-id YOUR_ACCOUNT_ID
 ```
 
-The helper requires a bootstrap token with `Account API Tokens: Edit` for the selected account. Enter it at the hidden prompt or provide it through `CLOUDFLARE_TOKEN_CREATOR_TOKEN`. It resolves Cloudflare's current permission-group ID, creates a token restricted to `Account Filter Lists: Edit` on that account, verifies access to the list already configured for `cf-redirect`, and stores the generated token in the OS keychain without printing it. Use `--verify-list-id LIST_ID` to override the configured list for verification. Cloudflare cannot restrict this permission to one list; the token can edit all filter and Bulk Redirect Lists in the account. If verification or storage fails, the helper revokes the generated token.
+The helper opens Cloudflare's official token-template URL with the account, token name, and `Account Filter Lists: Edit` permission prefilled. Review and create the token in the browser, then paste it into the hidden terminal prompt. The helper verifies access to the list already configured for `cf-redirect` and stores the token in the OS keychain without printing it or passing it as a process argument. Use `--verify-list-id LIST_ID` to override the configured list for verification, or `--no-open` to print the form URL. Cloudflare cannot restrict this permission to one list; the token can edit all filter and Bulk Redirect Lists in the account.
 
 ## Usage
 
