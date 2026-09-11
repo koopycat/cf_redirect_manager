@@ -90,9 +90,13 @@ cf-redirect add example.com/blog/ https://www.example.com/articles/ --dry-run
 cf-redirect add example.com/blog/ https://www.example.com/articles/ --yes
 cf-redirect edit example.com/blog/ https://www.example.com/new-blog/ --yes
 cf-redirect delete example.com/blog/ --yes
+cf-redirect clear --dry-run
+cf-redirect clear --yes
 cf-redirect import redirects.csv --dry-run
 cf-redirect status OPERATION_ID
 ```
+
+`clear` plans and displays deletion of every entry in the configured list before applying it. Interactive use requires confirmation; scripts must pass `--yes`, and `--dry-run` only displays the plan. It deletes explicit item IDs through Cloudflare's asynchronous delete operation and never uses the replace-all endpoint.
 
 Cloudflare permits a source URL without a scheme, such as `example.com/blog/`; this matches both HTTP and HTTPS. Targets must remain absolute `http://` or `https://` URLs. Sources and targets reject fragments, user information, and control characters.
 

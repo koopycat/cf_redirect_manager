@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -13,11 +14,12 @@ import (
 )
 
 type fakeAPI struct {
-	current   []domain.Redirect
-	calls     []string
-	deleted   []string
-	created   []domain.Redirect
-	waitError map[string]error
+	current       []domain.Redirect
+	calls         []string
+	deleted       []string
+	deleteBatches [][]string
+	created       []domain.Redirect
+	waitError     map[string]error
 }
 
 func (f *fakeAPI) ListItems(context.Context, string, string) ([]domain.Redirect, error) {
@@ -27,7 +29,8 @@ func (f *fakeAPI) ListItems(context.Context, string, string) ([]domain.Redirect,
 func (f *fakeAPI) DeleteItems(_ context.Context, _, _ string, ids []string) (cloudflare.BulkOperation, error) {
 	f.calls = append(f.calls, "delete")
 	f.deleted = append(f.deleted, ids...)
-	return cloudflare.BulkOperation{ID: "delete-op", Status: "pending"}, nil
+	f.deleteBatches = append(f.deleteBatches, append([]string(nil), ids...))
+	return cloudflare.BulkOperation{ID: fmt.Sprintf("delete-op-%d", len(f.deleteBatches)), Status: "pending"}, nil
 }
 func (f *fakeAPI) CreateItems(_ context.Context, _, _ string, items []domain.Redirect) (cloudflare.BulkOperation, error) {
 	f.calls = append(f.calls, "create")
@@ -60,7 +63,7 @@ func TestExecutorDeletesUpdatesThenWaitsThenCreates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantCalls := []string{"list", "delete", "wait-delete-op", "create", "wait-create-op"}
+	wantCalls := []string{"list", "delete", "wait-delete-op-1", "create", "wait-create-op"}
 	if !reflect.DeepEqual(api.calls, wantCalls) {
 		t.Fatalf("calls = %v, want %v", api.calls, wantCalls)
 	}
@@ -69,6 +72,64 @@ func TestExecutorDeletesUpdatesThenWaitsThenCreates(t *testing.T) {
 	}
 	if len(report.Phases) != 2 || !report.Phases[0].Completed || !report.Phases[1].Completed {
 		t.Fatalf("unexpected report: %#v", report)
+	}
+}
+
+func TestExecutorBatchesLargeDeletesAndWaitsBetweenBatches(t *testing.T) {
+	current := make([]domain.Redirect, mutationBatchSize+1)
+	changes := make([]planner.Change, len(current))
+	for i := range current {
+		current[i] = domain.Redirect{
+			ID:         fmt.Sprintf("id-%04d", i),
+			Source:     fmt.Sprintf("https://source-%04d.example", i),
+			Target:     "https://target.example",
+			StatusCode: 301,
+		}
+		item := current[i]
+		changes[i] = planner.Change{Kind: planner.Delete, Before: &item}
+	}
+	api := &fakeAPI{current: current, waitError: map[string]error{}}
+	report, err := (Executor{API: api, AccountID: "account", ListID: "list"}).Apply(context.Background(), planner.Plan{Changes: changes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCalls := []string{"list", "delete", "wait-delete-op-1", "delete", "wait-delete-op-2"}
+	if !reflect.DeepEqual(api.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", api.calls, wantCalls)
+	}
+	if len(api.deleteBatches) != 2 || len(api.deleteBatches[0]) != mutationBatchSize || len(api.deleteBatches[1]) != 1 {
+		t.Fatalf("delete batches = %v", slicesToLengths(api.deleteBatches))
+	}
+	if len(report.Phases) != 2 || !report.Phases[0].Completed || report.Phases[0].Requested != mutationBatchSize || !report.Phases[1].Completed || report.Phases[1].Requested != 1 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func slicesToLengths[T any](items [][]T) []int {
+	lengths := make([]int, len(items))
+	for i := range items {
+		lengths[i] = len(items[i])
+	}
+	return lengths
+}
+
+func TestExecutorBatchesLargeCreatesAndWaitsBetweenBatches(t *testing.T) {
+	changes := make([]planner.Change, mutationBatchSize+1)
+	for i := range changes {
+		item := domain.New(fmt.Sprintf("https://source-%04d.example", i), "https://target.example")
+		changes[i] = planner.Change{Kind: planner.Add, After: &item}
+	}
+	api := &fakeAPI{waitError: map[string]error{}}
+	report, err := (Executor{API: api, AccountID: "account", ListID: "list"}).Apply(context.Background(), planner.Plan{Changes: changes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCalls := []string{"list", "create", "wait-create-op", "create", "wait-create-op"}
+	if !reflect.DeepEqual(api.calls, wantCalls) {
+		t.Fatalf("calls = %v, want %v", api.calls, wantCalls)
+	}
+	if len(api.created) != mutationBatchSize+1 || len(report.Phases) != 2 || report.Phases[0].Requested != mutationBatchSize || report.Phases[1].Requested != 1 {
+		t.Fatalf("created=%d report=%#v", len(api.created), report)
 	}
 }
 

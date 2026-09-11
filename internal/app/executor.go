@@ -20,6 +20,10 @@ type RedirectAPI interface {
 	WaitBulkOperation(ctx context.Context, accountID, operationID string, interval time.Duration) (cloudflare.BulkOperation, error)
 }
 
+// mutationBatchSize bounds request bodies and keeps bulk operations aligned
+// with the largest page this client reads from Cloudflare at once.
+const mutationBatchSize = 500
+
 type Executor struct {
 	API          RedirectAPI
 	AccountID    string
@@ -108,10 +112,14 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 	report.Revalidated = true
 
 	deleteIDs, creates := split(plan)
-	if len(deleteIDs) > 0 {
-		e.report(fmt.Sprintf("delete phase: removing %d item(s)…", len(deleteIDs)))
-		result := PhaseResult{Phase: DeletePhase, Requested: len(deleteIDs)}
-		operation, err := e.API.DeleteItems(ctx, e.AccountID, e.ListID, deleteIDs)
+	for start := 0; start < len(deleteIDs); start += mutationBatchSize {
+		end := min(start+mutationBatchSize, len(deleteIDs))
+		batch := deleteIDs[start:end]
+		batchNumber := start/mutationBatchSize + 1
+		batchCount := (len(deleteIDs) + mutationBatchSize - 1) / mutationBatchSize
+		e.report(fmt.Sprintf("delete phase: removing batch %d/%d (%d item(s))…", batchNumber, batchCount, len(batch)))
+		result := PhaseResult{Phase: DeletePhase, Requested: len(batch)}
+		operation, err := e.API.DeleteItems(ctx, e.AccountID, e.ListID, batch)
 		result.Operation = operation
 		if err == nil {
 			if operation.ID != "" {
@@ -123,16 +131,20 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 		if err != nil {
 			result.Err = err
 			report.Phases = append(report.Phases, result)
-			return report, &ExecutionError{Report: report, Err: fmt.Errorf("delete phase: %w", err)}
+			return report, &ExecutionError{Report: report, Err: fmt.Errorf("delete phase batch %d/%d: %w", batchNumber, batchCount, err)}
 		}
 		result.Completed = true
 		report.Phases = append(report.Phases, result)
 	}
 
-	if len(creates) > 0 {
-		e.report(fmt.Sprintf("create phase: adding %d item(s)…", len(creates)))
-		result := PhaseResult{Phase: CreatePhase, Requested: len(creates)}
-		operation, err := e.API.CreateItems(ctx, e.AccountID, e.ListID, creates)
+	for start := 0; start < len(creates); start += mutationBatchSize {
+		end := min(start+mutationBatchSize, len(creates))
+		batch := creates[start:end]
+		batchNumber := start/mutationBatchSize + 1
+		batchCount := (len(creates) + mutationBatchSize - 1) / mutationBatchSize
+		e.report(fmt.Sprintf("create phase: adding batch %d/%d (%d item(s))…", batchNumber, batchCount, len(batch)))
+		result := PhaseResult{Phase: CreatePhase, Requested: len(batch)}
+		operation, err := e.API.CreateItems(ctx, e.AccountID, e.ListID, batch)
 		result.Operation = operation
 		if err == nil {
 			if operation.ID != "" {
@@ -144,7 +156,7 @@ func (e Executor) Apply(ctx context.Context, plan planner.Plan) (Report, error) 
 		if err != nil {
 			result.Err = err
 			report.Phases = append(report.Phases, result)
-			return report, &ExecutionError{Report: report, Err: fmt.Errorf("create phase: %w", err)}
+			return report, &ExecutionError{Report: report, Err: fmt.Errorf("create phase batch %d/%d: %w", batchNumber, batchCount, err)}
 		}
 		result.Completed = true
 		report.Phases = append(report.Phases, result)

@@ -84,6 +84,19 @@ func EditRedirect(current []domain.Redirect, id, source, target string) (Plan, e
 	return Plan{Changes: []Change{{Kind: Update, Before: pointer(*old), After: pointer(replacement)}}}, nil
 }
 
+// DeleteAll plans deletion of every currently listed item. Empty lists produce
+// an empty plan, and each deletion retains its explicit Cloudflare item ID.
+func DeleteAll(current []domain.Redirect) (Plan, error) {
+	if err := validateCurrent(current); err != nil {
+		return Plan{}, err
+	}
+	changes := make([]Change, len(current))
+	for i := range current {
+		changes[i] = Change{Kind: Delete, Before: pointer(current[i])}
+	}
+	return Plan{Changes: changes}, nil
+}
+
 // DeleteRedirect plans deletion by explicit Cloudflare item ID.
 func DeleteRedirect(current []domain.Redirect, id string) (Plan, error) {
 	if err := validateCurrent(current); err != nil {

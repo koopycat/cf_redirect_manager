@@ -42,6 +42,35 @@ func TestAddAndExplicitDelete(t *testing.T) {
 	}
 }
 
+func TestDeleteAllUsesEveryExplicitID(t *testing.T) {
+	one := existing()
+	two := domain.Redirect{ID: "id-2", Source: "https://two.example", Target: "https://target.example/two", StatusCode: 301}
+	plan, err := DeleteAll([]domain.Redirect{two, one})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Changes) != 2 {
+		t.Fatalf("changes = %d", len(plan.Changes))
+	}
+	for i, wantID := range []string{two.ID, one.ID} {
+		change := plan.Changes[i]
+		if change.Kind != Delete || change.Before == nil || change.Before.ID != wantID || change.After != nil {
+			t.Fatalf("change %d = %#v", i, change)
+		}
+	}
+	plan, err = DeleteAll(nil)
+	if err != nil || !plan.Empty() {
+		t.Fatalf("empty DeleteAll = %#v, %v", plan, err)
+	}
+}
+
+func TestDeleteAllRejectsCurrentItemsWithoutIDs(t *testing.T) {
+	_, err := DeleteAll([]domain.Redirect{{Source: "https://one.example", Target: "https://target.example", StatusCode: 301}})
+	if err == nil {
+		t.Fatal("expected missing ID error")
+	}
+}
+
 func TestImportUpsertPreservesExistingAndNeverDeletesOmitted(t *testing.T) {
 	old := existing()
 	omitted := domain.Redirect{ID: "id-2", Source: "https://omitted.example", Target: "https://keep.example", StatusCode: 302, Comment: "untouched"}

@@ -97,9 +97,25 @@ func TestTerminalCommentSanitization(t *testing.T) {
 	}
 }
 
+func TestClearCommandRequiresNoArgumentsAndHasMutationGuards(t *testing.T) {
+	root := NewRootCmd()
+	clear, _, err := root.Find([]string{"clear"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clear.Args == nil || clear.Args(clear, []string{"unexpected"}) == nil {
+		t.Fatal("clear must reject positional arguments")
+	}
+	for _, name := range []string{"dry-run", "yes"} {
+		if clear.Flags().Lookup(name) == nil {
+			t.Fatalf("clear is missing --%s", name)
+		}
+	}
+}
+
 func TestRootIncludesRequiredCommands(t *testing.T) {
 	root := NewRootCmd()
-	for _, name := range []string{"list", "search", "add", "edit", "delete", "import", "config", "auth", "login", "logout", "status", "tui"} {
+	for _, name := range []string{"list", "search", "add", "edit", "delete", "clear", "import", "config", "auth", "login", "logout", "status", "tui"} {
 		if _, _, err := root.Find([]string{name}); err != nil {
 			t.Fatalf("command %q is missing: %v", name, err)
 		}

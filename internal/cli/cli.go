@@ -50,7 +50,7 @@ func NewRootCmd() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&o.accountID, "account-id", "", "Cloudflare account ID (or CLOUDFLARE_ACCOUNT_ID)")
 	root.PersistentFlags().StringVar(&o.listID, "list-id", "", "Cloudflare redirect list ID (or CLOUDFLARE_LIST_ID)")
-	root.AddCommand(listCmd(o), searchCmd(o), addCmd(o), editCmd(o), deleteCmd(o), importCmd(o), configCmd(o), authCmd(o), loginCmd(o), logoutCmd(o), statusCmd(o), tuiCmd(o))
+	root.AddCommand(listCmd(o), searchCmd(o), addCmd(o), editCmd(o), deleteCmd(o), clearCmd(o), importCmd(o), configCmd(o), authCmd(o), loginCmd(o), logoutCmd(o), statusCmd(o), tuiCmd(o))
 	return root
 }
 
@@ -148,6 +148,20 @@ func deleteCmd(o *options) *cobra.Command {
 			return planner.DeleteRedirect(current, item.ID)
 		})
 	}}
+	mutationFlags(cmd, &dryRun, &yes)
+	return cmd
+}
+
+func clearCmd(o *options) *cobra.Command {
+	var dryRun, yes bool
+	cmd := &cobra.Command{
+		Use:   "clear",
+		Short: "Plan and delete every redirect from the configured list",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return makeMutation(cmd, o, dryRun, yes, planner.DeleteAll)
+		},
+	}
 	mutationFlags(cmd, &dryRun, &yes)
 	return cmd
 }
