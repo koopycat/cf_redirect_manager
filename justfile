@@ -8,6 +8,7 @@ fmt-check:
 
 test:
     go test ./...
+    bash scripts/create-cloudflare-token_test.sh
 
 race:
     go test -race ./...

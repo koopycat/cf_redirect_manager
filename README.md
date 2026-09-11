@@ -67,7 +67,17 @@ For automation, avoid putting the token in arguments:
 printf '%s' "$TOKEN" | cf-redirect auth login --token-stdin
 ```
 
-The token needs permission to read and edit the configured account-level Bulk Redirect List.
+The token needs Account-level `Account Filter Lists: Edit` permission for the configured account. `Read` is insufficient because add, edit, import, and delete mutate list items.
+
+To create a least-privilege account-owned token automatically, run the helper from a checkout:
+
+```sh
+scripts/create-cloudflare-token \
+  --account-id YOUR_ACCOUNT_ID \
+  --list-id YOUR_LIST_ID
+```
+
+The helper requires a bootstrap token with `Account API Tokens: Edit` for the selected account. Enter it at the hidden prompt or provide it through `CLOUDFLARE_TOKEN_CREATOR_TOKEN`. It resolves Cloudflare's current permission-group ID, creates a token restricted to `Account Filter Lists: Edit` on that account, verifies access to the configured list, and stores the generated token in the OS keychain without printing it. If verification or storage fails, it revokes the generated token.
 
 ## Usage
 

@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Create and store a least-privilege Cloudflare token for cf-redirect.
+
+Usage:
+  create-cloudflare-token --account-id ACCOUNT_ID --list-id LIST_ID [--name NAME]
+
+The bootstrap credential must have Account API Tokens: Edit for the selected
+account. Set CLOUDFLARE_TOKEN_CREATOR_TOKEN or enter it at the hidden prompt.
+The generated token receives only Account Filter Lists: Edit on that account.
+It is verified against the configured list and stored in the OS keychain by
+cf-redirect; it is never printed.
+EOF
+}
+
+account_id=""
+list_id=""
+token_name="cf-redirect-$(date -u +%Y%m%dT%H%M%SZ)"
+
+while (($#)); do
+  case "$1" in
+    --account-id)
+      [[ $# -ge 2 ]] || { echo "--account-id requires a value" >&2; exit 2; }
+      account_id="$2"
+      shift 2
+      ;;
+    --list-id)
+      [[ $# -ge 2 ]] || { echo "--list-id requires a value" >&2; exit 2; }
+      list_id="$2"
+      shift 2
+      ;;
+    --name)
+      [[ $# -ge 2 ]] || { echo "--name requires a value" >&2; exit 2; }
+      token_name="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$account_id" =~ ^[[:xdigit:]]{32}$ ]] || { echo "--account-id must be a 32-character hexadecimal ID" >&2; exit 2; }
+[[ "$list_id" =~ ^[[:xdigit:]]{32}$ ]] || { echo "--list-id must be a 32-character hexadecimal ID" >&2; exit 2; }
+[[ -n "$token_name" && ${#token_name} -le 120 ]] || { echo "--name must contain 1 to 120 characters" >&2; exit 2; }
+
+for command_name in curl jq; do
+  command -v "$command_name" >/dev/null || { echo "$command_name is required" >&2; exit 1; }
+done
+
+if [[ -n "${CF_REDIRECT_BIN:-}" ]]; then
+  cf_redirect="$CF_REDIRECT_BIN"
+elif command -v cf-redirect >/dev/null; then
+  cf_redirect="$(command -v cf-redirect)"
+elif [[ -x "$(dirname "$0")/../bin/cf-redirect" ]]; then
+  cf_redirect="$(cd "$(dirname "$0")/.." && pwd)/bin/cf-redirect"
+else
+  echo "cf-redirect is required to verify and securely store the generated token" >&2
+  exit 1
+fi
+[[ -x "$cf_redirect" ]] || { echo "cf-redirect executable not found: $cf_redirect" >&2; exit 1; }
+
+bootstrap_token="${CLOUDFLARE_TOKEN_CREATOR_TOKEN:-}"
+if [[ -z "$bootstrap_token" ]]; then
+  [[ -r /dev/tty ]] || { echo "set CLOUDFLARE_TOKEN_CREATOR_TOKEN when no terminal is available" >&2; exit 1; }
+  read -r -s -p "Cloudflare token with Account API Tokens: Edit: " bootstrap_token </dev/tty
+  printf '\n' >/dev/tty
+fi
+[[ -n "$bootstrap_token" ]] || { echo "bootstrap token must not be empty" >&2; exit 1; }
+
+api_base="${CLOUDFLARE_API_BASE_URL:-https://api.cloudflare.com/client/v4}"
+api_base="${api_base%/}"
+created_token_id=""
+stored=false
+response_file="$(mktemp)"
+chmod 600 "$response_file"
+
+cleanup() {
+  if [[ "$stored" != true && -n "$created_token_id" ]]; then
+    curl --silent --show-error --fail-with-body \
+      --request DELETE \
+      --header "Authorization: Bearer $bootstrap_token" \
+      "$api_base/accounts/$account_id/tokens/$created_token_id" \
+      >/dev/null 2>&1 || true
+  fi
+  rm -f "$response_file"
+}
+trap cleanup EXIT HUP INT TERM
+
+api_request() {
+  local method="$1"
+  local url="$2"
+  local body="${3:-}"
+  local status
+  local curl_args=(
+    --silent --show-error
+    --output "$response_file"
+    --write-out '%{http_code}'
+    --request "$method"
+    --header "Authorization: Bearer $bootstrap_token"
+    --header "Content-Type: application/json"
+  )
+  [[ -z "$body" ]] || curl_args+=(--data "$body")
+  status="$(curl "${curl_args[@]}" "$url")" || {
+    echo "Cloudflare API request failed" >&2
+    return 1
+  }
+  if [[ ! "$status" =~ ^2 ]]; then
+    jq -r '.errors[]?.message // empty' "$response_file" >&2 || true
+    echo "Cloudflare API request returned HTTP $status" >&2
+    return 1
+  fi
+  if [[ "$(jq -r '.success // false' "$response_file")" != true ]]; then
+    jq -r '.errors[]?.message // empty' "$response_file" >&2 || true
+    echo "Cloudflare API rejected the request" >&2
+    return 1
+  fi
+}
+
+api_request GET "$api_base/accounts/$account_id/tokens/permission_groups?name=Account%20Filter%20Lists%20Edit"
+permission_id="$(jq -r '[.result[] | select(.name == "Account Filter Lists Edit")][0].id // empty' "$response_file")"
+[[ -n "$permission_id" ]] || { echo "Cloudflare did not return the Account Filter Lists Edit permission group" >&2; exit 1; }
+
+resource="com.cloudflare.api.account.$account_id"
+payload="$(jq -cn \
+  --arg name "$token_name" \
+  --arg resource "$resource" \
+  --arg permission_id "$permission_id" \
+  '{name: $name, policies: [{effect: "allow", resources: {($resource): "*"}, permission_groups: [{id: $permission_id}]}]}')"
+
+api_request POST "$api_base/accounts/$account_id/tokens" "$payload"
+created_token_id="$(jq -r '.result.id // empty' "$response_file")"
+created_token="$(jq -r '.result.value // empty' "$response_file")"
+[[ -n "$created_token_id" && -n "$created_token" ]] || { echo "Cloudflare created no usable token" >&2; exit 1; }
+
+if ! printf '%s' "$created_token" | env -u CLOUDFLARE_API_TOKEN \
+  "$cf_redirect" --account-id "$account_id" --list-id "$list_id" auth login --token-stdin; then
+  echo "Generated token verification or keychain storage failed; the token was revoked" >&2
+  exit 1
+fi
+
+stored=true
+created_token=""
+echo "Created '$token_name' with Account Filter Lists: Edit and stored it in the OS keychain."
