@@ -39,6 +39,50 @@ func TestResolveSkipsFileWhenFlagsAndEnvironmentAreComplete(t *testing.T) {
 	}
 }
 
+func TestResolveAccountIDPrecedenceFlagThenEnvThenFile(t *testing.T) {
+	t.Run("flag", func(t *testing.T) {
+		lookup := func(string) (string, bool) { return "env-account", true }
+		got, err := resolveAccountID(" flag-account ", lookup, func() (Config, error) {
+			return Config{}, errors.New("config must not be loaded")
+		})
+		if err != nil || got != "flag-account" {
+			t.Fatalf("resolveAccountID() = %q, %v", got, err)
+		}
+	})
+
+	t.Run("environment", func(t *testing.T) {
+		lookup := func(key string) (string, bool) {
+			if key == AccountIDEnv {
+				return " env-account ", true
+			}
+			return "", false
+		}
+		got, err := resolveAccountID("", lookup, func() (Config, error) {
+			return Config{}, errors.New("config must not be loaded")
+		})
+		if err != nil || got != "env-account" {
+			t.Fatalf("resolveAccountID() = %q, %v", got, err)
+		}
+	})
+
+	t.Run("persisted config", func(t *testing.T) {
+		got, err := resolveAccountID("", func(string) (string, bool) { return "", false }, func() (Config, error) {
+			return Config{AccountID: " file-account "}, nil
+		})
+		if err != nil || got != "file-account" {
+			t.Fatalf("resolveAccountID() = %q, %v", got, err)
+		}
+	})
+}
+
+func TestResolveAccountIDRequiresAccount(t *testing.T) {
+	if _, err := resolveAccountID("", func(string) (string, bool) { return "", false }, func() (Config, error) {
+		return Config{}, nil
+	}); err == nil {
+		t.Fatal("expected missing account error")
+	}
+}
+
 func TestResolveRequiresBothIDs(t *testing.T) {
 	lookup := func(string) (string, bool) { return "", false }
 	load := func() (Config, error) { return Config{}, nil }

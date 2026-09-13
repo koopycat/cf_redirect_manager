@@ -37,6 +37,38 @@ func Resolve(accountID, listID string) (Config, error) {
 	})
 }
 
+// ResolveAccountID resolves only the account ID using the same precedence as
+// Resolve. Commands that operate on account-scoped state, such as logout, do
+// not need a redirect-list ID and must not require one.
+func ResolveAccountID(accountID string) (string, error) {
+	return resolveAccountID(accountID, os.LookupEnv, func() (Config, error) {
+		path, err := Path()
+		if err != nil {
+			return Config{}, err
+		}
+		return Load(path)
+	})
+}
+
+func resolveAccountID(accountID string, lookup func(string) (string, bool), load func() (Config, error)) (string, error) {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		accountID, _ = lookup(AccountIDEnv)
+		accountID = strings.TrimSpace(accountID)
+	}
+	if accountID == "" {
+		persisted, err := load()
+		if err != nil {
+			return "", err
+		}
+		accountID = strings.TrimSpace(persisted.AccountID)
+	}
+	if accountID == "" {
+		return "", fmt.Errorf("Cloudflare account ID is required (flag, %s, or config file)", AccountIDEnv)
+	}
+	return accountID, nil
+}
+
 func resolve(accountID, listID string, lookup func(string) (string, bool), load func() (Config, error)) (Config, error) {
 	cfg := Config{AccountID: strings.TrimSpace(accountID), ListID: strings.TrimSpace(listID)}
 	if cfg.AccountID == "" {

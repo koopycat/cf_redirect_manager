@@ -434,11 +434,11 @@ func loginCmd(o *options) *cobra.Command {
 
 func logoutCmd(o *options) *cobra.Command {
 	return &cobra.Command{Use: "logout", Short: "Remove the account-specific stored API token", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		cfg, err := config.Resolve(o.accountID, o.listID)
+		accountID, err := config.ResolveAccountID(o.accountID)
 		if err != nil {
 			return err
 		}
-		if err := auth.NewResolver(cfg.AccountID).Delete(); err != nil {
+		if err := auth.NewResolver(accountID).Delete(); err != nil {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "Stored API token removed.")

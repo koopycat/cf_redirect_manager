@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
+
+	"github.com/koopycat/cf-redirect/internal/auth"
 	"github.com/koopycat/cf-redirect/internal/domain"
 	"github.com/koopycat/cf-redirect/internal/planner"
 	"github.com/koopycat/cf-redirect/internal/textsafe"
@@ -137,6 +140,30 @@ func TestClearCommandRequiresNoArgumentsAndHasMutationGuards(t *testing.T) {
 		if clear.Flags().Lookup(name) == nil {
 			t.Fatalf("clear is missing --%s", name)
 		}
+	}
+}
+
+func TestLogoutUsesAccountFlagWithoutListIDOrPersistedConfig(t *testing.T) {
+	t.Setenv("CLOUDFLARE_LIST_ID", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	keyring.MockInit()
+	if err := keyring.Set(auth.KeyringService, auth.KeyringUser+":review-account", "account-token"); err != nil {
+		t.Fatal(err)
+	}
+
+	root := NewRootCmd()
+	root.SetArgs([]string{"--account-id", "review-account", "logout"})
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetErr(&output)
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := keyring.Get(auth.KeyringService, auth.KeyringUser+":review-account"); !errors.Is(err, keyring.ErrNotFound) || got != "" {
+		t.Fatalf("account token still exists: %q, %v", got, err)
+	}
+	if got, want := output.String(), "Stored API token removed.\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
