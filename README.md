@@ -19,7 +19,7 @@ Install on macOS or Linux with Homebrew:
 brew install koopycat/tap/cf-redirect
 ```
 
-Prebuilt archives for Linux and macOS (`amd64` and `arm64`) are available on the [GitHub Releases](https://github.com/koopycat/cf_redirect_manager/releases) page. Each release includes a `SHA256SUMS` file.
+Prebuilt archives for Linux and macOS (`amd64` and `arm64`) are available on the [GitHub Releases](https://github.com/koopycat/cf-redirect/releases) page. Each release includes a `SHA256SUMS` file.
 
 To install from source, Go 1.25 or newer is required:
 
