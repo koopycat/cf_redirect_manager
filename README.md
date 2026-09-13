@@ -35,7 +35,7 @@ Homebrew publishing uses a dedicated GitHub App installed only on `homebrew-tap`
 
 ## Configuration
 
-From a Bulk Redirects dashboard URL such as `https://dash.cloudflare.com/YOUR_ACCOUNT_ID/example.com/rules/settings/bulk-redirects/redirect-list/YOUR_LIST_ID/add-redirects`, the account ID is the first 32-hex segment and the list ID is the last one (the zone in the middle is only dashboard navigation context — Bulk Redirect Lists are account-level resources).
+From a Bulk Redirects dashboard URL such as `https://dash.cloudflare.com/ACCOUNT_ID/example.com/rules/settings/bulk-redirects/redirect-list/LIST_ID/add-redirects`, the account ID is the first path segment and the list ID follows `redirect-list` (the zone in the middle is only dashboard navigation context — Bulk Redirect Lists are account-level resources).
 
 Persist the IDs in the OS user config directory (`$XDG_CONFIG_HOME/cf-redirect/config.json` on supported Unix systems):
 
